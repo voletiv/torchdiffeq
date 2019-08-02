@@ -1,25 +1,25 @@
-import os
 import argparse
+import datetime
 import logging
-import time
-import numpy as np
-import numpy.random as npr
 import matplotlib
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
+import numpy as np
+import numpy.random as npr
+import os
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-
 parser = argparse.ArgumentParser()
 parser.add_argument('--adjoint', type=eval, default=False)
-parser.add_argument('--visualize', type=eval, default=False)
+parser.add_argument('--sample_step', type=int, default=10)
 parser.add_argument('--niters', type=int, default=2000)
 parser.add_argument('--lr', type=float, default=0.01)
 parser.add_argument('--gpu', type=int, default=0)
-parser.add_argument('--train_dir', type=str, default=None)
+parser.add_argument('--save_path', type=str, default='.')
 args = parser.parse_args()
 
 if args.adjoint:
@@ -77,8 +77,8 @@ def generate_spiral2d(nspiral=1000,
         plt.plot(orig_traj_cw[:, 0], orig_traj_cw[:, 1], label='clock')
         plt.plot(orig_traj_cc[:, 0], orig_traj_cc[:, 1], label='counter clock')
         plt.legend()
-        plt.savefig('./ground_truth.png', dpi=500)
-        print('Saved ground truth spiral at {}'.format('./ground_truth.png'))
+        plt.savefig(os.path.join(args.save_path, 'ground_truth.png'), dpi=500)
+        print('Saved ground truth spiral at {}'.format(os.path.join(args.save_path, 'ground_truth.png')))
 
     # sample starting timestamps
     orig_trajs = []
@@ -195,6 +195,12 @@ def normal_kl(mu1, lv1, mu2, lv2):
 
 
 if __name__ == '__main__':
+
+    if not os.path.exists(args.save_path):
+        args.save_path = os.path.join(os.path.dirname(args.save_path), '{0:%Y%m%d_%H%M%S}_{1}'.format(datetime.datetime.now(), os.path.basename(args.save_path)))
+        os.makedirs(args.save_path)
+        os.makedirs(os.path.join(args.save_path, 'samples'))
+
     latent_dim = 4
     nhidden = 20
     rnn_nhidden = 25
@@ -220,6 +226,7 @@ if __name__ == '__main__':
     )
     orig_trajs = torch.from_numpy(orig_trajs).float().to(device)
     samp_trajs = torch.from_numpy(samp_trajs).float().to(device)
+    orig_ts = torch.from_numpy(orig_ts).float().to(device)
     samp_ts = torch.from_numpy(samp_ts).float().to(device)
 
     # model
@@ -229,11 +236,11 @@ if __name__ == '__main__':
     params = (list(func.parameters()) + list(dec.parameters()) + list(rec.parameters()))
     optimizer = optim.Adam(params, lr=args.lr)
     loss_meter = RunningAverageMeter()
+    losses = []
+    losses_ma = []
 
-    if args.train_dir is not None:
-        if not os.path.exists(args.train_dir):
-            os.makedirs(args.train_dir)
-        ckpt_path = os.path.join(args.train_dir, 'ckpt.pth')
+    if args.save_path is not None:
+        ckpt_path = os.path.join(args.save_path, 'ckpt.pth')
         if os.path.exists(ckpt_path):
             checkpoint = torch.load(ckpt_path)
             func.load_state_dict(checkpoint['func_state_dict'])
@@ -245,6 +252,9 @@ if __name__ == '__main__':
             orig_ts = checkpoint['orig_ts']
             samp_ts = checkpoint['samp_ts']
             print('Loaded ckpt from {}'.format(ckpt_path))
+
+    log_file_name = os.path.join(args.save_path, 'log.txt')
+    log_file = open(log_file_name, "wt")
 
     try:
         for itr in range(1, args.niters + 1):
@@ -274,65 +284,92 @@ if __name__ == '__main__':
             loss.backward()
             optimizer.step()
             loss_meter.update(loss.item())
+            losses.append(loss.item())
+            losses_ma.append(loss_meter.avg)
 
-            print('Iter: {}, running avg elbo: {:.4f}'.format(itr, -loss_meter.avg))
+            log = 'Iter: {}, running avg elbo: {:.4f}\n'.format(itr, -loss_meter.avg)
+            print(log)
+            log_file.write(log)
+            log_file.flush()
+
+            if itr % args.sample_step == 0:
+                with torch.no_grad():
+                    # sample from trajectorys' approx. posterior
+                    h = rec.initHidden().to(device)
+                    for t in reversed(range(samp_trajs.size(1))):
+                        obs = samp_trajs[:, t, :]
+                        out, h = rec.forward(obs, h)
+                    qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
+                    epsilon = torch.randn(qz0_mean.size()).to(device)
+                    z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+
+                    # take first trajectory for visualization
+                    z0 = z0[0]
+
+                    ts_pos = np.linspace(0., 2. * np.pi, num=2000)
+                    ts_neg = np.linspace(-np.pi, 0., num=2000)[::-1].copy()
+                    ts_pos = torch.from_numpy(ts_pos).float().to(device)
+                    ts_neg = torch.from_numpy(ts_neg).float().to(device)
+
+                    zs_pos = odeint(func, z0, ts_pos)
+                    zs_neg = odeint(func, z0, ts_neg)
+
+                    xs_pos = dec(zs_pos)
+                    xs_neg = torch.flip(dec(zs_neg), dims=[0])
+
+                xs_pos = xs_pos.cpu().numpy()
+                xs_neg = xs_neg.cpu().numpy()
+                orig_traj = orig_trajs[0].cpu().numpy()
+                samp_traj = samp_trajs[0].cpu().numpy()
+
+                plt.figure()
+                plt.plot(orig_traj[:, 0], orig_traj[:, 1],
+                         'g', label='true trajectory')
+                plt.plot(xs_pos[:, 0], xs_pos[:, 1], 'r',
+                         label='learned trajectory (t>0)')
+                plt.plot(xs_neg[:, 0], xs_neg[:, 1], 'c',
+                         label='learned trajectory (t<0)')
+                plt.scatter(samp_traj[:, 0], samp_traj[
+                            :, 1], label='sampled data', s=3)
+                plt.legend()
+                plt.savefig(os.path.join(args.save_path, 'samples', 'vis_{:05d}.png'.format(itr)), dpi=500)
+                plt.clf()
+                plt.close()
+                log = 'Saved visualization figure at {}\n'.format(os.path.join(args.save_path, 'samples', 'vis.png'))
+                print(log)
+                log_file.write(log)
+                log_file.flush()
+
+                # Plot
+                plt.plot(losses, alpha=0.7, label="losses")
+                plt.plot(losses_ma, alpha=0.7, label="losses_ma")
+                plt.legend()
+                plt.xlabel("Iterations")
+                # plt.title("Losses")
+                plt.savefig(os.path.join(args.save_path, "plots.png"), bbox_inches='tight', pad_inches=0.5)
+                plt.clf()
+                plt.close()
 
     except KeyboardInterrupt:
-        if args.train_dir is not None:
-            ckpt_path = os.path.join(args.train_dir, 'ckpt.pth')
-            torch.save({
-                'func_state_dict': func.state_dict(),
-                'rec_state_dict': rec.state_dict(),
-                'dec_state_dict': dec.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'orig_trajs': orig_trajs,
-                'samp_trajs': samp_trajs,
-                'orig_ts': orig_ts,
-                'samp_ts': samp_ts,
-            }, ckpt_path)
-            print('Stored ckpt at {}'.format(ckpt_path))
-    print('Training complete after {} iters.'.format(itr))
+        print("Ctrl+C!\n")
 
-    if args.visualize:
-        with torch.no_grad():
-            # sample from trajectorys' approx. posterior
-            h = rec.initHidden().to(device)
-            for t in reversed(range(samp_trajs.size(1))):
-                obs = samp_trajs[:, t, :]
-                out, h = rec.forward(obs, h)
-            qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
-            epsilon = torch.randn(qz0_mean.size()).to(device)
-            z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
-            orig_ts = torch.from_numpy(orig_ts).float().to(device)
+    ckpt_path = os.path.join(args.save_path, 'ckpt.pth')
+    torch.save({
+        'func_state_dict': func.state_dict(),
+        'rec_state_dict': rec.state_dict(),
+        'dec_state_dict': dec.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'orig_trajs': orig_trajs,
+        'samp_trajs': samp_trajs,
+        'orig_ts': orig_ts,
+        'samp_ts': samp_ts,
+    }, ckpt_path)
+    log = 'Stored ckpt at {}\n'.format(ckpt_path)
+    print(log)
+    log_file.write(log)
+    log_file.flush()
 
-            # take first trajectory for visualization
-            z0 = z0[0]
-
-            ts_pos = np.linspace(0., 2. * np.pi, num=2000)
-            ts_neg = np.linspace(-np.pi, 0., num=2000)[::-1].copy()
-            ts_pos = torch.from_numpy(ts_pos).float().to(device)
-            ts_neg = torch.from_numpy(ts_neg).float().to(device)
-
-            zs_pos = odeint(func, z0, ts_pos)
-            zs_neg = odeint(func, z0, ts_neg)
-
-            xs_pos = dec(zs_pos)
-            xs_neg = torch.flip(dec(zs_neg), dims=[0])
-
-        xs_pos = xs_pos.cpu().numpy()
-        xs_neg = xs_neg.cpu().numpy()
-        orig_traj = orig_trajs[0].cpu().numpy()
-        samp_traj = samp_trajs[0].cpu().numpy()
-
-        plt.figure()
-        plt.plot(orig_traj[:, 0], orig_traj[:, 1],
-                 'g', label='true trajectory')
-        plt.plot(xs_pos[:, 0], xs_pos[:, 1], 'r',
-                 label='learned trajectory (t>0)')
-        plt.plot(xs_neg[:, 0], xs_neg[:, 1], 'c',
-                 label='learned trajectory (t<0)')
-        plt.scatter(samp_traj[:, 0], samp_traj[
-                    :, 1], label='sampled data', s=3)
-        plt.legend()
-        plt.savefig('./vis.png', dpi=500)
-        print('Saved visualization figure at {}'.format('./vis.png'))
+    log = 'Training complete after {} iters.\n'.format(itr)
+    print(log)
+    log_file.write(log)
+    log_file.flush()
