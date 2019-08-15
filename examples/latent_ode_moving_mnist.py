@@ -12,14 +12,26 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import tqdm
 
 from moving_mnist import *
+
+
+# for i in tqdm.tqdm(range(10000)):
+#     this_dir = '/home/voletiv/Datasets/MyMovingMNIST/{:05d}'.format(i)
+#     os.makedirs(this_dir)
+#     for j in range(20):
+#         im = orig_trajs[i, j, 0].numpy()
+#         im = (im + 1.)/2.*255.
+#         im = im.astype('uint8')
+#         imageio.imwrite(os.path.join(this_dir, '{:02d}.png'.format(j+1)), im)
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_path', type=str, default='.',
                     help="Path where 'train-images-idx3-ubyte.gz' can be found") # http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz
 parser.add_argument('--save_path', type=str, default='./ODE_MMNIST_EXP1')
-parser.add_argument('--batch_size', type=int, default=10)
+parser.add_argument('--batch_size', type=int, default=100)
 parser.add_argument('--num_digits', type=int, default=1)
 parser.add_argument('--n_frames_input', type=int, default=10)
 parser.add_argument('--n_frames_output', type=int, default=10)
@@ -225,20 +237,25 @@ if __name__ == '__main__':
     b = .3
     device = torch.device('cuda:' + str(args.gpu)
                           if torch.cuda.is_available() else 'cpu')
+    print("device:", device)
 
     # Data
+    print("Loading data")
     dl = moving_mnist_ode_data_loader(args.data_path, num_objects=[args.num_digits], batch_size=args.batch_size,
                                         n_frames_input=args.n_frames_input, n_frames_output=args.n_frames_output,
                                         n_workers=8)
     orig_trajs, samp_trajs, orig_ts, samp_ts = next(iter(dl))
     orig_trajs, samp_trajs, orig_ts, samp_ts = orig_trajs.to(device), samp_trajs.to(device), orig_ts.to(device), samp_ts.to(device)
 
-    # model
+    # Model
+    print("Making models")
     func = LatentODEfunc(latent_dim, nhidden).to(device)
     enc = EncoderRNN(latent_dim, obs_dim, rnn_nhidden).to(device)
     dec = Decoder(latent_dim, obs_dim, nhidden).to(device)
     params = (list(func.parameters()) + list(dec.parameters()) + list(enc.parameters()))
     optimizer = optim.Adam(params, lr=args.lr)
+
+    # Vars
     loss_meter = RunningAverageMeter()
     elbos = []
     elbos_ma = []
@@ -250,6 +267,7 @@ if __name__ == '__main__':
     if args.save_path is not None:
         ckpt_path = os.path.join(args.save_path, 'ckpt.pth')
         if os.path.exists(ckpt_path):
+            print("Loading model ckpt from", args.save_path)
             checkpoint = torch.load(ckpt_path)
             func.load_state_dict(checkpoint['func_state_dict'])
             enc.load_state_dict(checkpoint['enc_state_dict'])
@@ -265,22 +283,29 @@ if __name__ == '__main__':
     log_file = open(log_file_name, "wt")
 
     try:
+        print("Starting training...")
         for itr in range(1, args.niters + 1):
+            # print("itr", itr)
             optimizer.zero_grad()
             # backward in time to infer q(z_0)
             h = enc.initHidden(args.batch_size).to(device)
+            # for t in tqdm.tqdm(reversed(range(samp_trajs.size(1))), total=samp_trajs.size(1)):
             for t in reversed(range(samp_trajs.size(1))):
                 obs = samp_trajs[:, t, :]
                 out, h = enc.forward(obs, h)
+            # print("encoded all time steps")
             qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
             epsilon = torch.randn(qz0_mean.size()).to(device)
             z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
 
             # forward in time and solve ode for reconstructions
+            # print("doing ode")
             pred_z = odeint(func, z0, samp_ts).permute(1, 0, 2)
+            # print("decoding after ode")
             pred_x = dec(pred_z)
 
             # compute loss
+            # print("computing loss")
             noise_std_ = torch.zeros(pred_x.size()).to(device) + noise_std
             noise_logvar = 2. * torch.log(noise_std_).to(device)
             logpx = log_normal_pdf(
@@ -289,7 +314,9 @@ if __name__ == '__main__':
             analytic_kl = normal_kl(qz0_mean, qz0_logvar,
                                     pz0_mean, pz0_logvar).sum(-1)
             loss = torch.mean(-logpx + analytic_kl, dim=0)
+            # print("doing loss.backward()")
             loss.backward()
+            # print("doing optimizer.step()")
             optimizer.step()
             loss_meter.update(loss.item())
             elbos.append(-loss.item())
@@ -301,6 +328,7 @@ if __name__ == '__main__':
             log_file.flush()
 
             if itr % args.sample_step == 0:
+                # print("Sampling")
                 with torch.no_grad():
                     # sample from trajectorys' approx. posterior
                     h = enc.initHidden(args.batch_size).to(device)
