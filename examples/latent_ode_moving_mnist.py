@@ -156,9 +156,32 @@ class EncoderRNN(nn.Module):
         return torch.zeros(batch_size, self.nhidden)
 
 
+class Encoder(nn.Module):
+
+    def __init__(self, latent_dim=128, obs_dim=1024, nhidden=256):
+        super(Encoder, self).__init__()
+        self.latent_dim = latent_dim
+        self.obs_dim = obs_dim
+        self.nhidden = nhidden
+        self.res_block1 = ResBlock(1, 16, 2, 'downsample')    # 32x32
+        self.res_block2 = ResBlock(16, 32, 2, 'downsample')    # 16x16
+        self.res_block3 = ResBlock(32, 64, 2, 'downsample')    # 8x8
+        self.res_block4 = ResBlock(64, 64, 2, 'downsample')    # 4x4; 4*4*64 = 1024 = obs_dim
+        self.i2h = nn.Linear(obs_dim, nhidden)
+        self.h2o = nn.Linear(nhidden, latent_dim)
+
+    def forward(self, x):
+        bs = x.shape[0]
+        x = self.res_block4(self.res_block3(self.res_block2(self.res_block1(x))))
+        x = x.view(-1, self.obs_dim)
+        h = torch.tanh(self.i2h(x))
+        out = self.h2o(h)
+        return out
+
+
 class Decoder(nn.Module):
 
-    def __init__(self, latent_dim=4, obs_dim=16, nhidden=20):
+    def __init__(self, latent_dim=128, obs_dim=1024, nhidden=256):
         super(Decoder, self).__init__()
         self.latent_dim = latent_dim
         self.obs_dim = obs_dim
@@ -166,7 +189,7 @@ class Decoder(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.fc1 = nn.Linear(latent_dim, nhidden)
         self.fc2 = nn.Linear(nhidden, obs_dim)
-        self.res_block1 = ResBlock(1, 64, 2, 'upsample')
+        self.res_block1 = ResBlock(64, 64, 2, 'upsample')
         self.res_block2 = ResBlock(64, 32, 2, 'upsample')
         self.res_block3 = ResBlock(32, 16, 2, 'upsample')
         self.res_block4 = ResBlock(16, 1, 2, 'upsample')
@@ -177,7 +200,7 @@ class Decoder(nn.Module):
         out = self.fc1(z)
         out = self.relu(out)
         out = self.fc2(out)
-        out = out.view(-1, 1, 4, 4)
+        out = out.view(-1, 64, 4, 4)
         out = self.res_block4(self.res_block3(self.res_block2(self.res_block1(out))))
         out = self.tanh(out)
         out = out.view(bs, -1, 1, 64, 64)
@@ -226,10 +249,10 @@ if __name__ == '__main__':
         os.makedirs(args.save_path)
         os.makedirs(os.path.join(args.save_path, 'samples'))
 
-    latent_dim = 16
-    nhidden = 50
-    rnn_nhidden = 50
-    obs_dim = 16
+    latent_dim = 128
+    obs_dim = 1024
+    # rnn_nhidden = 50
+    nhidden = 256
     start = 0.
     stop = 1.
     noise_std = .3
@@ -250,15 +273,16 @@ if __name__ == '__main__':
     # Model
     print("Making models")
     func = LatentODEfunc(latent_dim, nhidden).to(device)
-    enc = EncoderRNN(latent_dim, obs_dim, rnn_nhidden).to(device)
+    # enc = EncoderRNN(latent_dim, obs_dim, rnn_nhidden).to(device)
+    enc = Encoder(latent_dim, obs_dim, nhidden).to(device)
     dec = Decoder(latent_dim, obs_dim, nhidden).to(device)
     params = (list(func.parameters()) + list(dec.parameters()) + list(enc.parameters()))
     optimizer = optim.Adam(params, lr=args.lr)
 
     # Vars
     loss_meter = RunningAverageMeter()
-    elbos = []
-    elbos_ma = []
+    losses = []
+    losses_ma = []
     ts_pos = np.linspace(0., 1., num=20)
     ts_pos = torch.from_numpy(ts_pos).float().to(device)
     orig_traj = orig_trajs[0].cpu().numpy()
@@ -287,20 +311,23 @@ if __name__ == '__main__':
         for itr in range(1, args.niters + 1):
             # print("itr", itr)
             optimizer.zero_grad()
+            # import pdb; pdb.set_trace()
             # backward in time to infer q(z_0)
-            h = enc.initHidden(args.batch_size).to(device)
+            # h = enc.initHidden(args.batch_size).to(device)
             # for t in tqdm.tqdm(reversed(range(samp_trajs.size(1))), total=samp_trajs.size(1)):
-            for t in reversed(range(samp_trajs.size(1))):
-                obs = samp_trajs[:, t, :]
-                out, h = enc.forward(obs, h)
+            # for t in reversed(range(samp_trajs.size(1))):
+            #     obs = samp_trajs[:, t, :]
+            #     out, h = enc.forward(obs, h)
+            z = enc(samp_trajs.view(-1, 1, 64, 64)).view(args.batch_size, -1, latent_dim)
             # print("encoded all time steps")
-            qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
-            epsilon = torch.randn(qz0_mean.size()).to(device)
-            z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+            # qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
+            # epsilon = torch.randn(qz0_mean.size()).to(device)
+            # z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
 
             # forward in time and solve ode for reconstructions
             # print("doing ode")
-            pred_z = odeint(func, z0, samp_ts).permute(1, 0, 2)
+            # pred_z = odeint(func, z0, samp_ts).permute(1, 0, 2)     # B x T x dim
+            pred_z = odeint(func, z.permute(1, 0, 2)[0], samp_ts).permute(1, 0, 2)     # B x T x dim
             # print("decoding after ode")
             pred_x = dec(pred_z)
 
@@ -308,21 +335,24 @@ if __name__ == '__main__':
             # print("computing loss")
             noise_std_ = torch.zeros(pred_x.size()).to(device) + noise_std
             noise_logvar = 2. * torch.log(noise_std_).to(device)
-            logpx = log_normal_pdf(
-                samp_trajs, pred_x, noise_logvar).sum(-1).sum(-1).sum(-1).sum(-1)
-            pz0_mean = pz0_logvar = torch.zeros(z0.size()).to(device)
-            analytic_kl = normal_kl(qz0_mean, qz0_logvar,
-                                    pz0_mean, pz0_logvar).sum(-1)
-            loss = torch.mean(-logpx + analytic_kl, dim=0)
+            logpx = log_normal_pdf(samp_trajs, pred_x, noise_logvar).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+            # pz0_mean = pz0_logvar = torch.zeros(z0.size()).to(device)
+            # analytic_kl = normal_kl(qz0_mean, qz0_logvar,
+            #                         pz0_mean, pz0_logvar).sum(-1)
+            # loss = torch.mean(-logpx + analytic_kl, dim=0)
+            noise_std_z = torch.zeros(pred_z.size()).to(device) + noise_std
+            noise_logvar_z = 2. * torch.log(noise_std_z).to(device)
+            logpx += log_normal_pdf(z, pred_z, noise_logvar_z).sum(-1).sum(-1).sum(-1).sum(-1).mean()
             # print("doing loss.backward()")
+            loss = -logpx
             loss.backward()
             # print("doing optimizer.step()")
             optimizer.step()
             loss_meter.update(loss.item())
-            elbos.append(-loss.item())
-            elbos_ma.append(-loss_meter.avg)
+            losses.append(loss.item())
+            losses_ma.append(loss_meter.avg)
 
-            log = 'Iter: {}, running avg elbo: {:.4f}\n'.format(itr, -loss_meter.avg)
+            log = 'Iter: {}, running avg loss: {:.4f}\n'.format(itr, loss_meter.avg)
             print(log)
             log_file.write(log)
             log_file.flush()
@@ -331,20 +361,20 @@ if __name__ == '__main__':
                 # print("Sampling")
                 with torch.no_grad():
                     # sample from trajectorys' approx. posterior
-                    h = enc.initHidden(args.batch_size).to(device)
-                    for t in reversed(range(samp_trajs.size(1))):
-                        obs = samp_trajs[:, t, :]
-                        out, h = enc.forward(obs, h)
-                    qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
-                    epsilon = torch.randn(qz0_mean.size()).to(device)
-                    z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
-                    zs_preds = odeint(func, z0, ts_pos).permute(1, 0, 2)
+                    # h = enc.initHidden(args.batch_size).to(device)
+                    # for t in reversed(range(samp_trajs.size(1))):
+                    #     obs = samp_trajs[:, t, :]
+                    #     out, h = enc.forward(obs, h)
+                    # qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
+                    # epsilon = torch.randn(qz0_mean.size()).to(device)
+                    # z = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+                    z = enc(samp_trajs.view(-1, 1, 64, 64)).view(args.batch_size, -1, latent_dim)
+                    zs_preds = odeint(func, z.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2)
                     xs_preds = dec(zs_preds)
 
                 xs_preds = xs_preds.cpu().numpy()
                 # take first trajectory for visualization
                 xs_pred = xs_preds[0]
-                # import pdb; pdb.set_trace()
 
                 plt.figure(figsize=(min(40, args.n_frames_input+args.n_frames_output),2))
                 ax = []
@@ -367,12 +397,12 @@ if __name__ == '__main__':
                 log_file.flush()
 
                 # Plot
-                plt.plot(elbos, alpha=0.7, label="elbo")
-                plt.plot(elbos_ma, alpha=0.7, label="elbo_ma")
+                plt.plot(losses, alpha=0.7, label="loss")
+                plt.plot(losses_ma, alpha=0.7, label="loss_ma")
                 plt.legend()
                 plt.xlabel("Iterations")
                 # plt.title("Losses")
-                plt.savefig(os.path.join(args.save_path, "elbo.png"), bbox_inches='tight', pad_inches=0.1)
+                plt.savefig(os.path.join(args.save_path, "loss.png"), bbox_inches='tight', pad_inches=0.1)
                 plt.clf()
                 plt.close()
 
