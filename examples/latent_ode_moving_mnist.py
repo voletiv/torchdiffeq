@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import imageio
 import logging
 import matplotlib
 matplotlib.use('agg')
@@ -12,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import torchvision.utils as vutils
 import tqdm
 
 from moving_mnist import *
@@ -31,13 +33,14 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--data_path', type=str, default='.',
                     help="Path where 'train-images-idx3-ubyte.gz' can be found") # http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz
 parser.add_argument('--save_path', type=str, default='./ODE_MMNIST_EXP1')
-parser.add_argument('--num_of_samples', type=int, default=100)
-parser.add_argument('--batch_size', type=int, default=10)
+parser.add_argument('--num_of_samples', type=int, default=1000)
+parser.add_argument('--batch_size', type=int, default=100)
 parser.add_argument('--num_digits', type=int, default=1)
 parser.add_argument('--n_frames_input', type=int, default=10)
 parser.add_argument('--n_frames_output', type=int, default=10)
 parser.add_argument('--adjoint', type=eval, default=False)
 parser.add_argument('--sample_step', type=int, default=10)
+parser.add_argument('--sample_n_vids', type=int, default=50)
 parser.add_argument('--niters', type=int, default=2000)
 parser.add_argument('--lr', type=float, default=0.0001)
 parser.add_argument('--gpu', type=int, default=0)
@@ -286,8 +289,7 @@ if __name__ == '__main__':
     losses_ma = []
     ts_pos = np.linspace(0., 1., num=20)
     ts_pos = torch.from_numpy(ts_pos).float().to(device)
-    orig_traj = orig_trajs[0].cpu().numpy()
-    samp_traj = samp_trajs[0].cpu().numpy()
+    orig_xs = orig_trajs[:args.sample_n_vids].cpu()
 
     if args.save_path is not None:
         ckpt_path = os.path.join(args.save_path, 'ckpt.pth')
@@ -299,7 +301,6 @@ if __name__ == '__main__':
             dec.load_state_dict(checkpoint['dec_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             orig_trajs = checkpoint['orig_trajs']
-            samp_trajs = checkpoint['samp_trajs']
             orig_ts = checkpoint['orig_ts']
             samp_ts = checkpoint['samp_ts']
             print('Loaded ckpt from {}'.format(ckpt_path))
@@ -334,7 +335,7 @@ if __name__ == '__main__':
                 # pred_z = odeint(func, z0, samp_ts).permute(1, 0, 2)     # B x T x dim
                 pred_z = odeint(func, z.permute(1, 0, 2)[0], samp_ts).permute(1, 0, 2)     # B x T x dim
                 # print("decoding after ode")
-                pred_x = dec(pred_z)
+                pred_x = dec(pred_z)    # BxTx1x64x64
 
                 # compute loss
                 # print("computing loss")
@@ -375,38 +376,54 @@ if __name__ == '__main__':
                     # qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
                     # epsilon = torch.randn(qz0_mean.size()).to(device)
                     # z = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
-                    z = enc(samp_trajs[:10].view(-1, 1, 64, 64)).view(10, -1, latent_dim)
-                    zs_preds = odeint(func, z.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2)
-                    xs_preds = dec(zs_preds)
+                    z = enc(samp_trajs[:args.sample_n_vids].view(-1, 1, 64, 64)).view(args.sample_n_vids, -1, latent_dim)   # BxTxdim
+                    xs_dec_z = dec(z)    # BxTx1x64x64
+                    zs_preds = odeint(func, z.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2) # BxTxdim
+                    xs_dec_z_preds = dec(zs_preds)    # BxTx1x64x64
 
-                xs_preds = xs_preds.cpu().numpy()
+                xs_dec_z = xs_dec_z.cpu()
+                xs_dec_z_preds = xs_dec_z_preds.cpu()
                 # take first trajectory for visualization
-                xs_pred = xs_preds[0]
+                # xs_pred = xs_preds[0]
 
-                plt.figure(figsize=(min(40, args.n_frames_input+args.n_frames_output),2))
-                ax = []
-                for i in range(min(40, args.n_frames_input+args.n_frames_output)):
-                    ax.append(plt.subplot(2, min(40, args.n_frames_input+args.n_frames_output), i+1))
-                    plt.imshow(orig_traj[i-1, 0], cmap='gray'); plt.axis('off')
-                for i in range(20):
-                    ax.append(plt.subplot(2, min(40, args.n_frames_input+args.n_frames_output), i+min(40, args.n_frames_input+args.n_frames_output)+1))
-                    plt.imshow(xs_pred[i, 0], cmap='gray'); plt.axis('off')
-                for a in ax:
-                    a.set_xticklabels([]);
-                    a.set_yticklabels([]);
-                plt.subplots_adjust(hspace=0, wspace=0)
-                plt.savefig(os.path.join(args.save_path, 'samples', 'vis_{:05d}.png'.format(itr)), bbox_inches='tight', dpi=500)
-                plt.clf()
-                plt.close()
-                log = 'Saved visualization figure at {}\n'.format(os.path.join(args.save_path, 'samples', 'vis_{:05d}.png'.format(itr)))
-                print(log)
-                log_file.write(log)
-                log_file.flush()
+                frames = []
+                for t in range(xs_dec_z.shape[1]):
+                    xs_t = orig_xs[:, t]                         # Bx64x64
+                    xs_dec_z_t = xs_dec_z[:, t]                  # Bx64x64
+                    xs_dec_z_preds_t = xs_dec_z_preds[:, t]      # Bx64x64
+                    # import pdb; pdb.set_trace()
+                    frame = torch.cat([xs_t, torch.ones(args.sample_n_vids, 1, 64, 2),
+                                       xs_dec_z_t, torch.ones(args.sample_n_vids, 1, 64, 2),
+                                       xs_dec_z_preds_t], dim=-1)
+                    frames.append(vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).mul(255.).numpy().astype('uint8'))
+
+                imageio.mimwrite(os.path.join(args.save_path, 'samples', f'vis_{itr:06d}.gif'), frames, fps=4)
+
+                # plt.figure(figsize=(min(40, args.n_frames_input+args.n_frames_output),2))
+                # ax = []
+                # for i in range(min(40, args.n_frames_input+args.n_frames_output)):
+                #     ax.append(plt.subplot(2, min(40, args.n_frames_input+args.n_frames_output), i+1))
+                #     plt.imshow(orig_traj[i-1, 0], cmap='gray'); plt.axis('off')
+                # for i in range(20):
+                #     ax.append(plt.subplot(2, min(40, args.n_frames_input+args.n_frames_output), i+min(40, args.n_frames_input+args.n_frames_output)+1))
+                #     plt.imshow(xs_pred[i, 0], cmap='gray'); plt.axis('off')
+                # for a in ax:
+                #     a.set_xticklabels([]);
+                #     a.set_yticklabels([]);
+                # plt.subplots_adjust(hspace=0, wspace=0)
+                # plt.savefig(os.path.join(args.save_path, 'samples', 'vis_{:05d}.png'.format(itr)), bbox_inches='tight', dpi=500)
+                # plt.clf()
+                # plt.close()
+                # log = 'Saved visualization figure at {}\n'.format(os.path.join(args.save_path, 'samples', 'vis_{:05d}.png'.format(itr)))
+                # print(log)
+                # log_file.write(log)
+                # log_file.flush()
 
                 # Plot
                 plt.plot(losses, alpha=0.7, label="loss")
                 plt.plot(losses_ma, alpha=0.7, label="loss_ma")
                 plt.legend()
+                plt.yscale("symlog")
                 plt.xlabel("Iterations")
                 # plt.title("Losses")
                 plt.savefig(os.path.join(args.save_path, "loss.png"), bbox_inches='tight', pad_inches=0.1)
