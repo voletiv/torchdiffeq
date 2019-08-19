@@ -39,12 +39,14 @@ parser.add_argument('--num_digits', type=int, default=1)
 parser.add_argument('--n_frames_input', type=int, default=10)
 parser.add_argument('--n_frames_output', type=int, default=10)
 parser.add_argument('--adjoint', type=eval, default=False)
-parser.add_argument('--sample_step', type=int, default=10)
-parser.add_argument('--sample_n_vids', type=int, default=50)
+parser.add_argument('--vis_step', type=int, default=10)
+parser.add_argument('--vis_n_vids', type=int, default=50, help="How many videos to visualize")
 parser.add_argument('--niters', type=int, default=2000)
 parser.add_argument('--lr', type=float, default=0.0001)
 parser.add_argument('--gpu', type=int, default=0)
 args = parser.parse_args()
+
+assert args.vis_n_vids <= args.batch_size, "ERROR: vis_n_vids must be <= batch_size! Given vis_n_vids=" + str(args.vis_n_vids) + " ; batch_size=" + str(args.batch_size)
 
 if args.adjoint:
     from torchdiffeq import odeint_adjoint as odeint
@@ -272,7 +274,13 @@ if __name__ == '__main__':
                                         n_frames_input=args.n_frames_input, n_frames_output=args.n_frames_output,
                                         n_workers=8)
     orig_trajs, samp_trajs, orig_ts, samp_ts = next(iter(dl))
-    orig_trajs, samp_trajs, orig_ts, samp_ts = orig_trajs.to(device), samp_trajs.to(device), orig_ts.to(device), samp_ts.to(device)
+    samp_trajs, samp_ts = samp_trajs.to(device), samp_ts.to(device)
+
+    # Val data
+    print("Loading val data")
+    orig_trajs_val, samp_trajs_val, orig_ts_val, samp_ts_val = next(iter(dl))
+    orig_trajs_val, samp_trajs_val, orig_ts_val, samp_ts_val = orig_trajs_val[:args.vis_n_vids], samp_trajs_val[:args.vis_n_vids], orig_ts_val[:args.vis_n_vids], samp_ts_val[:args.vis_n_vids]
+    samp_trajs_val, samp_ts_val = samp_trajs_val.to(device), samp_ts_val.to(device)
 
     # Model
     print("Making models")
@@ -284,12 +292,15 @@ if __name__ == '__main__':
     optimizer = optim.Adam(params, lr=args.lr)
 
     # Vars
-    loss_meter = RunningAverageMeter()
+    loss_meter = RunningAverageMeter(momentum=0.99)
     losses = []
     losses_ma = []
-    ts_pos = np.linspace(0., 1., num=20)
+    val_loss_meter = RunningAverageMeter(momentum=0.9)
+    val_losses = []
+    val_losses_ma = []
+    ts_pos = np.linspace(0., 1., num=args.n_frames_input+args.n_frames_output)
     ts_pos = torch.from_numpy(ts_pos).float().to(device)
-    orig_xs = orig_trajs[:args.sample_n_vids].cpu()
+    orig_xs = orig_trajs[:args.vis_n_vids]
 
     if args.save_path is not None:
         ckpt_path = os.path.join(args.save_path, 'ckpt.pth')
@@ -308,46 +319,34 @@ if __name__ == '__main__':
     log_file_name = os.path.join(args.save_path, 'log.txt')
     log_file = open(log_file_name, "wt")
 
+    noise_std_ = torch.zeros(args.batch_size, args.n_frames_input, 1, 64, 64) + noise_std
+    noise_logvar = 2. * torch.log(noise_std_).to(device)
+    noise_std_z = torch.zeros(args.batch_size, args.n_frames_input, latent_dim) + noise_std
+    noise_logvar_z = 2. * torch.log(noise_std_z).to(device)
+
     try:
         print("Starting training...")
         n_batches = args.num_of_samples//args.batch_size
+        batch_ids = np.arange(n_batches)
         print("n_batches", n_batches)
         for itr in range(1, args.niters + 1):
             total_loss = 0
-            for b in range(n_batches):
+            np.random.shuffle(batch_ids)
+
+            # TRAIN
+            for b in batch_ids:
                 # print("itr", itr)
                 optimizer.zero_grad()
-                # import pdb; pdb.set_trace()
-                # backward in time to infer q(z_0)
-                # h = enc.initHidden(args.batch_size).to(device)
-                # for t in tqdm.tqdm(reversed(range(samp_trajs.size(1))), total=samp_trajs.size(1)):
-                # for t in reversed(range(samp_trajs.size(1))):
-                #     obs = samp_trajs[:, t, :]
-                #     out, h = enc.forward(obs, h)
                 z = enc(samp_trajs[b*args.batch_size:(b+1)*args.batch_size].view(-1, 1, 64, 64)).view(args.batch_size, -1, latent_dim)
-                # print("encoded all time steps")
-                # qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
-                # epsilon = torch.randn(qz0_mean.size()).to(device)
-                # z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
-
                 # forward in time and solve ode for reconstructions
                 # print("doing ode")
-                # pred_z = odeint(func, z0, samp_ts).permute(1, 0, 2)     # B x T x dim
                 pred_z = odeint(func, z.permute(1, 0, 2)[0], samp_ts).permute(1, 0, 2)     # B x T x dim
                 # print("decoding after ode")
                 pred_x = dec(pred_z)    # BxTx1x64x64
 
                 # compute loss
                 # print("computing loss")
-                noise_std_ = torch.zeros(pred_x.size()).to(device) + noise_std
-                noise_logvar = 2. * torch.log(noise_std_).to(device)
                 logpx = log_normal_pdf(samp_trajs[b*args.batch_size:(b+1)*args.batch_size], pred_x, noise_logvar).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                # pz0_mean = pz0_logvar = torch.zeros(z0.size()).to(device)
-                # analytic_kl = normal_kl(qz0_mean, qz0_logvar,
-                #                         pz0_mean, pz0_logvar).sum(-1)
-                # loss = torch.mean(-logpx + analytic_kl, dim=0)
-                noise_std_z = torch.zeros(pred_z.size()).to(device) + noise_std
-                noise_logvar_z = 2. * torch.log(noise_std_z).to(device)
                 logpx += log_normal_pdf(z, pred_z, noise_logvar_z).sum(-1).sum(-1).sum(-1).sum(-1).mean()
                 # print("doing loss.backward()")
                 loss = -logpx
@@ -365,63 +364,67 @@ if __name__ == '__main__':
             log_file.write(log)
             log_file.flush()
 
-            if itr % args.sample_step == 0:
+            # VISUALIZE
+            if itr % args.vis_step == 0:
+
+                # Sampling from TRAIN data
                 # print("Sampling")
                 with torch.no_grad():
-                    # sample from trajectorys' approx. posterior
-                    # h = enc.initHidden(args.batch_size).to(device)
-                    # for t in reversed(range(samp_trajs.size(1))):
-                    #     obs = samp_trajs[:, t, :]
-                    #     out, h = enc.forward(obs, h)
-                    # qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
-                    # epsilon = torch.randn(qz0_mean.size()).to(device)
-                    # z = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
-                    z = enc(samp_trajs[:args.sample_n_vids].view(-1, 1, 64, 64)).view(args.sample_n_vids, -1, latent_dim)   # BxTxdim
+                    z = enc(samp_trajs[:args.vis_n_vids].view(-1, 1, 64, 64)).view(args.vis_n_vids, -1, latent_dim)   # BxTxdim
                     xs_dec_z = dec(z)    # BxTx1x64x64
-                    zs_preds = odeint(func, z.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2) # BxTxdim
-                    xs_dec_z_preds = dec(zs_preds)    # BxTx1x64x64
+                    pred_z = odeint(func, z.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2) # BxTxdim
+                    xs_dec_pred_z = dec(pred_z)    # BxTx1x64x64
 
                 xs_dec_z = xs_dec_z.cpu()
-                xs_dec_z_preds = xs_dec_z_preds.cpu()
-                # take first trajectory for visualization
-                # xs_pred = xs_preds[0]
+                xs_dec_pred_z = xs_dec_pred_z.cpu()
 
                 frames = []
                 for t in range(xs_dec_z.shape[1]):
                     xs_t = orig_xs[:, t]                         # Bx64x64
                     xs_dec_z_t = xs_dec_z[:, t]                  # Bx64x64
-                    xs_dec_z_preds_t = xs_dec_z_preds[:, t]      # Bx64x64
-                    # import pdb; pdb.set_trace()
-                    frame = torch.cat([xs_t, torch.ones(args.sample_n_vids, 1, 64, 2),
-                                       xs_dec_z_t, torch.ones(args.sample_n_vids, 1, 64, 2),
-                                       xs_dec_z_preds_t], dim=-1)
+                    xs_dec_pred_z_t = xs_dec_pred_z[:, t]      # Bx64x64
+                    frame = torch.cat([xs_t, torch.ones(args.vis_n_vids, 1, 64, 2),
+                                       xs_dec_z_t, torch.ones(args.vis_n_vids, 1, 64, 2),
+                                       xs_dec_pred_z_t], dim=-1)
                     frames.append(vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).mul(255.).numpy().astype('uint8'))
 
-                imageio.mimwrite(os.path.join(args.save_path, 'samples', f'vis_{itr:06d}.gif'), frames, fps=4)
+                imageio.mimwrite(os.path.join(args.save_path, 'samples', f'train_vis_{itr:06d}.gif'), frames, fps=4)
 
-                # plt.figure(figsize=(min(40, args.n_frames_input+args.n_frames_output),2))
-                # ax = []
-                # for i in range(min(40, args.n_frames_input+args.n_frames_output)):
-                #     ax.append(plt.subplot(2, min(40, args.n_frames_input+args.n_frames_output), i+1))
-                #     plt.imshow(orig_traj[i-1, 0], cmap='gray'); plt.axis('off')
-                # for i in range(20):
-                #     ax.append(plt.subplot(2, min(40, args.n_frames_input+args.n_frames_output), i+min(40, args.n_frames_input+args.n_frames_output)+1))
-                #     plt.imshow(xs_pred[i, 0], cmap='gray'); plt.axis('off')
-                # for a in ax:
-                #     a.set_xticklabels([]);
-                #     a.set_yticklabels([]);
-                # plt.subplots_adjust(hspace=0, wspace=0)
-                # plt.savefig(os.path.join(args.save_path, 'samples', 'vis_{:05d}.png'.format(itr)), bbox_inches='tight', dpi=500)
-                # plt.clf()
-                # plt.close()
-                # log = 'Saved visualization figure at {}\n'.format(os.path.join(args.save_path, 'samples', 'vis_{:05d}.png'.format(itr)))
-                # print(log)
-                # log_file.write(log)
-                # log_file.flush()
+                # Sampling from VAL data
+                # print("Sampling")
+                with torch.no_grad():
+                    z = enc(samp_trajs_val[:args.vis_n_vids].view(-1, 1, 64, 64)).view(args.vis_n_vids, -1, latent_dim)   # BxTxdim
+                    xs_dec_z = dec(z)    # BxTx1x64x64
+                    pred_z = odeint(func, z.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2) # BxTxdim
+                    xs_dec_pred_z = dec(pred_z)    # BxTx1x64x64
+
+                logpx = log_normal_pdf(samp_trajs_val, xs_dec_pred_z[:, :args.n_frames_input], noise_logvar[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+                logpx += log_normal_pdf(z, pred_z[:, :args.n_frames_input], noise_logvar_z[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+                val_loss = -logpx
+                val_loss_meter.update(val_loss)
+                val_losses.append(val_loss)
+                val_losses_ma.append(val_loss_meter.avg)
+
+                xs_dec_z = xs_dec_z.cpu()
+                xs_dec_pred_z = xs_dec_pred_z.cpu()
+
+                frames = []
+                for t in range(xs_dec_z.shape[1]):
+                    xs_t = orig_xs[:, t]                         # Bx64x64
+                    xs_dec_z_t = xs_dec_z[:, t]                  # Bx64x64
+                    xs_dec_pred_z_t = xs_dec_pred_z[:, t]      # Bx64x64
+                    frame = torch.cat([xs_t, torch.ones(args.vis_n_vids, 1, 64, 2),
+                                       xs_dec_z_t, torch.ones(args.vis_n_vids, 1, 64, 2),
+                                       xs_dec_pred_z_t], dim=-1)
+                    frames.append(vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).mul(255.).numpy().astype('uint8'))
+
+                imageio.mimwrite(os.path.join(args.save_path, 'samples', f'val_vis_{itr:06d}.gif'), frames, fps=4)
 
                 # Plot
-                plt.plot(losses, alpha=0.7, label="loss")
-                plt.plot(losses_ma, alpha=0.7, label="loss_ma")
+                plt.plot(np.arange(1, itr+1), losses, '--', c='C0', alpha=0.7, label="loss")
+                plt.plot(np.arange(1, itr+1), losses_ma, c='C0', alpha=0.7, label="loss")
+                plt.plot(np.arange(itr//args.vis_step)*args.vis_step + args.vis_step, val_losses, '--', c='C1', alpha=0.7, label="val_loss_ma")
+                plt.plot(np.arange(itr//args.vis_step)*args.vis_step + args.vis_step, val_losses_ma, c='C1', alpha=0.7, label="val_loss_ma")
                 plt.legend()
                 plt.yscale("symlog")
                 plt.xlabel("Iterations")
