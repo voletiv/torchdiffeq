@@ -283,12 +283,13 @@ if __name__ == '__main__':
                                         n_workers=8)
     orig_trajs, samp_trajs, orig_ts, samp_ts = next(iter(dl))
     samp_trajs, samp_ts = samp_trajs.to(device), samp_ts.to(device)
+    orig_trajs_vis = orig_trajs[:args.vis_n_vids].to(device)
 
     # Val data
     print("Loading val data")
-    orig_trajs_val, samp_trajs_val, orig_ts_val, samp_ts_val = next(iter(dl))
-    orig_trajs_val, samp_trajs_val, orig_ts_val, samp_ts_val = orig_trajs_val[:args.vis_n_vids], samp_trajs_val[:args.vis_n_vids], orig_ts_val[:args.vis_n_vids], samp_ts_val[:args.vis_n_vids]
-    samp_trajs_val, samp_ts_val = samp_trajs_val.to(device), samp_ts_val.to(device)
+    orig_trajs_val, _, orig_ts_val, _ = next(iter(dl))
+    orig_trajs_val = orig_trajs_val[:args.vis_n_vids]
+    orig_trajs_val_gpu = orig_trajs_val.clone().to(device)
 
     # Model
     print("Making models")
@@ -303,9 +304,12 @@ if __name__ == '__main__':
     loss_meter = RunningAverageMeter(momentum=0.99)
     losses = []
     losses_ma = []
-    val_loss_meter = RunningAverageMeter(momentum=0.9)
-    val_losses = []
-    val_losses_ma = []
+    val_loss_meter_input = RunningAverageMeter(momentum=0.9)
+    val_losses_input = []
+    val_losses_ma_input = []
+    val_loss_meter_output = RunningAverageMeter(momentum=0.9)
+    val_losses_output = []
+    val_losses_ma_output = []
     ts_pos = np.linspace(0., 1., num=args.n_frames_input+args.n_frames_output)
     ts_pos = torch.from_numpy(ts_pos).float().to(device)
     orig_xs = orig_trajs[:args.vis_n_vids]
@@ -335,18 +339,19 @@ if __name__ == '__main__':
     try:
         print("Starting training...")
         n_batches = args.num_of_samples//args.batch_size
-        batch_ids = np.arange(n_batches)
         print("n_batches", n_batches)
+
+        vid_ids = np.arange(args.num_of_samples)
 
         for itr in range(1, args.niters + 1):
             total_loss = 0
-            np.random.shuffle(batch_ids)
+            np.random.shuffle(vid_ids)
 
             # TRAIN
-            for b in batch_ids:
+            for b in range(n_batches):
                 # print("itr", itr)
                 optimizer.zero_grad()
-                z = enc(samp_trajs[b*args.batch_size:(b+1)*args.batch_size].view(-1, 1, 64, 64)).view(args.batch_size, -1, latent_dim)
+                z = enc(samp_trajs[vid_ids[b*args.batch_size:(b+1)*args.batch_size]].view(-1, 1, 64, 64)).view(args.batch_size, -1, latent_dim)
                 # forward in time and solve ode for reconstructions
                 # print("doing ode")
                 pred_z = odeint(func, z.permute(1, 0, 2)[0], samp_ts).permute(1, 0, 2)     # B x T x dim
@@ -355,7 +360,7 @@ if __name__ == '__main__':
 
                 # compute loss
                 # print("computing loss")
-                logpx = log_normal_pdf(samp_trajs[b*args.batch_size:(b+1)*args.batch_size], pred_x, noise_logvar).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+                logpx = log_normal_pdf(samp_trajs[vid_ids[b*args.batch_size:(b+1)*args.batch_size]], pred_x, noise_logvar).sum(-1).sum(-1).sum(-1).sum(-1).mean()
                 logpx += log_normal_pdf(z, pred_z, noise_logvar_z).sum(-1).sum(-1).sum(-1).sum(-1).mean()
                 # print("doing loss.backward()")
                 loss = -logpx
@@ -379,7 +384,7 @@ if __name__ == '__main__':
                 # Sampling from TRAIN data
                 # print("Sampling")
                 with torch.no_grad():
-                    z = enc(samp_trajs[:args.vis_n_vids].view(-1, 1, 64, 64)).view(args.vis_n_vids, -1, latent_dim)   # BxTxdim
+                    z = enc(orig_trajs_vis[:args.vis_n_vids].view(-1, 1, 64, 64)).view(args.vis_n_vids, -1, latent_dim)   # BxTxdim
                     xs_dec_z = dec(z)    # BxTx1x64x64
                     pred_z = odeint(func, z.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2) # BxTxdim
                     xs_dec_pred_z = dec(pred_z)    # BxTx1x64x64
@@ -388,7 +393,7 @@ if __name__ == '__main__':
                 xs_dec_pred_z = xs_dec_pred_z.cpu()
 
                 frames = []
-                for t in range(xs_dec_z.shape[1]):
+                for t in range(xs_dec_pred_z.shape[1]):
                     xs_t = orig_xs[:, t]                         # Bx64x64
                     xs_dec_z_t = xs_dec_z[:, t]                  # Bx64x64
                     xs_dec_pred_z_t = xs_dec_pred_z[:, t]      # Bx64x64
@@ -404,24 +409,31 @@ if __name__ == '__main__':
                 # Sampling from VAL data
                 # print("Sampling")
                 with torch.no_grad():
-                    z_val = enc(samp_trajs_val[:args.vis_n_vids].view(-1, 1, 64, 64)).view(args.vis_n_vids, -1, latent_dim)   # BxTxdim
+                    z_val = enc(orig_trajs_val_gpu.view(-1, 1, 64, 64)).view(args.vis_n_vids, -1, latent_dim)   # BxTxdim
                     xs_dec_z_val = dec(z_val)    # BxTx1x64x64
                     pred_z_val = odeint(func, z_val.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2) # BxTxdim
                     xs_dec_pred_z_val = dec(pred_z_val)    # BxTx1x64x64
 
-                logpx_val = log_normal_pdf(samp_trajs_val, xs_dec_pred_z_val[:, :args.n_frames_input], noise_logvar[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                logpx_val += log_normal_pdf(z_val, pred_z_val[:, :args.n_frames_input], noise_logvar_z[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                val_loss = -logpx.item()
-                val_loss_meter.update(val_loss)
-                val_losses.append(val_loss)
-                val_losses_ma.append(val_loss_meter.avg)
+                logpx_val_input = log_normal_pdf(orig_trajs_val_gpu[:, :args.n_frames_input], xs_dec_pred_z_val[:, :args.n_frames_input], noise_logvar[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+                logpx_val_input += log_normal_pdf(z_val[:, :args.n_frames_input], pred_z_val[:, :args.n_frames_input], noise_logvar_z[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+                val_loss_input = -logpx_val_input.item()
+                val_loss_meter_input.update(val_loss_input)
+                val_losses_input.append(val_loss_input)
+                val_losses_ma_input.append(val_loss_meter_input.avg)
+
+                logpx_val_output = log_normal_pdf(orig_trajs_val_gpu[:, args.n_frames_input:], xs_dec_pred_z_val[:, args.n_frames_input:], noise_logvar[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+                logpx_val_output += log_normal_pdf(z_val[:, args.n_frames_input:], pred_z_val[:, args.n_frames_input:], noise_logvar_z[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+                val_loss_output = -logpx_val_output.item()
+                val_loss_meter_output.update(val_loss_output)
+                val_losses_output.append(val_loss_output)
+                val_losses_ma_output.append(val_loss_meter_output.avg)
 
                 xs_dec_z_val = xs_dec_z_val.cpu()
                 xs_dec_pred_z_val = xs_dec_pred_z_val.cpu()
 
                 frames_val = []
-                for t in range(xs_dec_z_val.shape[1]):
-                    xs_t = orig_xs[:, t]                         # Bx64x64
+                for t in range(xs_dec_pred_z_val.shape[1]):
+                    xs_t = orig_trajs_val[:, t]                         # Bx64x64
                     xs_dec_z_t = xs_dec_z_val[:, t]                  # Bx64x64
                     xs_dec_pred_z_t = xs_dec_pred_z_val[:, t]      # Bx64x64
                     frame = torch.cat([xs_t, torch.ones(args.vis_n_vids, 1, 64, 2),
@@ -431,13 +443,15 @@ if __name__ == '__main__':
                     del frame
 
                 imageio.mimwrite(os.path.join(args.save_path, 'samples', f'val_vis_{itr:06d}.gif'), frames_val, fps=4)
-                del xs_dec_z_val, xs_dec_pred_z_val, logpx_val, frames_val
+                del xs_dec_z_val, xs_dec_pred_z_val, logpx_val_input, logpx_val_output, frames_val
 
                 # Plot
                 plt.plot(np.arange(1, itr+1), losses, '--', c='C0', alpha=0.7, label="loss")
                 plt.plot(np.arange(1, itr+1), losses_ma, c='C0', alpha=0.7, label="loss")
-                plt.plot(np.arange(itr//args.vis_step)*args.vis_step + args.vis_step, val_losses, '--', c='C1', alpha=0.7, label="val_loss_ma")
-                plt.plot(np.arange(itr//args.vis_step)*args.vis_step + args.vis_step, val_losses_ma, c='C1', alpha=0.7, label="val_loss_ma")
+                plt.plot(np.arange(itr//args.vis_step)*args.vis_step + args.vis_step, val_losses_input, '--', c='C1', alpha=0.5, label="val_loss_input")
+                plt.plot(np.arange(itr//args.vis_step)*args.vis_step + args.vis_step, val_losses_ma_input, c='C1', alpha=0.5, label="val_loss_ma_input")
+                plt.plot(np.arange(itr//args.vis_step)*args.vis_step + args.vis_step, val_losses_output, '--', c='C2', alpha=0.5, label="val_loss_output")
+                plt.plot(np.arange(itr//args.vis_step)*args.vis_step + args.vis_step, val_losses_ma_output, c='C2', alpha=0.5, label="val_loss_ma_output")
                 plt.legend()
                 plt.yscale("symlog")
                 plt.xlabel("Iterations")
