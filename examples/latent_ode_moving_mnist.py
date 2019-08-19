@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import gc
 import imageio
 import logging
 import matplotlib
@@ -41,7 +42,7 @@ parser.add_argument('--n_frames_output', type=int, default=10)
 parser.add_argument('--adjoint', type=eval, default=False)
 parser.add_argument('--vis_step', type=int, default=10)
 parser.add_argument('--vis_n_vids', type=int, default=50, help="How many videos to visualize")
-parser.add_argument('--niters', type=int, default=2000)
+parser.add_argument('--niters', type=int, default=10000)
 parser.add_argument('--lr', type=float, default=0.0001)
 parser.add_argument('--gpu', type=int, default=0)
 args = parser.parse_args()
@@ -248,6 +249,13 @@ def normal_kl(mu1, lv1, mu2, lv2):
     return kl
 
 
+def mem_check():
+    import os
+    import psutil
+    process = psutil.Process(os.getpid())
+    print("Mem:", process.memory_info().rss/1024/1024/1024, "GB")
+
+
 if __name__ == '__main__':
 
     if not os.path.exists(args.save_path):
@@ -329,6 +337,7 @@ if __name__ == '__main__':
         n_batches = args.num_of_samples//args.batch_size
         batch_ids = np.arange(n_batches)
         print("n_batches", n_batches)
+
         for itr in range(1, args.niters + 1):
             total_loss = 0
             np.random.shuffle(batch_ids)
@@ -387,38 +396,42 @@ if __name__ == '__main__':
                                        xs_dec_z_t, torch.ones(args.vis_n_vids, 1, 64, 2),
                                        xs_dec_pred_z_t], dim=-1)
                     frames.append(vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).mul(255.).numpy().astype('uint8'))
+                    del frame
 
                 imageio.mimwrite(os.path.join(args.save_path, 'samples', f'train_vis_{itr:06d}.gif'), frames, fps=4)
+                del xs_dec_z, xs_dec_pred_z, frames
 
                 # Sampling from VAL data
                 # print("Sampling")
                 with torch.no_grad():
-                    z = enc(samp_trajs_val[:args.vis_n_vids].view(-1, 1, 64, 64)).view(args.vis_n_vids, -1, latent_dim)   # BxTxdim
-                    xs_dec_z = dec(z)    # BxTx1x64x64
-                    pred_z = odeint(func, z.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2) # BxTxdim
-                    xs_dec_pred_z = dec(pred_z)    # BxTx1x64x64
+                    z_val = enc(samp_trajs_val[:args.vis_n_vids].view(-1, 1, 64, 64)).view(args.vis_n_vids, -1, latent_dim)   # BxTxdim
+                    xs_dec_z_val = dec(z_val)    # BxTx1x64x64
+                    pred_z_val = odeint(func, z_val.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2) # BxTxdim
+                    xs_dec_pred_z_val = dec(pred_z_val)    # BxTx1x64x64
 
-                logpx = log_normal_pdf(samp_trajs_val, xs_dec_pred_z[:, :args.n_frames_input], noise_logvar[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                logpx += log_normal_pdf(z, pred_z[:, :args.n_frames_input], noise_logvar_z[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                val_loss = -logpx
+                logpx_val = log_normal_pdf(samp_trajs_val, xs_dec_pred_z_val[:, :args.n_frames_input], noise_logvar[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+                logpx_val += log_normal_pdf(z_val, pred_z_val[:, :args.n_frames_input], noise_logvar_z[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+                val_loss = -logpx.item()
                 val_loss_meter.update(val_loss)
                 val_losses.append(val_loss)
                 val_losses_ma.append(val_loss_meter.avg)
 
-                xs_dec_z = xs_dec_z.cpu()
-                xs_dec_pred_z = xs_dec_pred_z.cpu()
+                xs_dec_z_val = xs_dec_z_val.cpu()
+                xs_dec_pred_z_val = xs_dec_pred_z_val.cpu()
 
-                frames = []
-                for t in range(xs_dec_z.shape[1]):
+                frames_val = []
+                for t in range(xs_dec_z_val.shape[1]):
                     xs_t = orig_xs[:, t]                         # Bx64x64
-                    xs_dec_z_t = xs_dec_z[:, t]                  # Bx64x64
-                    xs_dec_pred_z_t = xs_dec_pred_z[:, t]      # Bx64x64
+                    xs_dec_z_t = xs_dec_z_val[:, t]                  # Bx64x64
+                    xs_dec_pred_z_t = xs_dec_pred_z_val[:, t]      # Bx64x64
                     frame = torch.cat([xs_t, torch.ones(args.vis_n_vids, 1, 64, 2),
                                        xs_dec_z_t, torch.ones(args.vis_n_vids, 1, 64, 2),
                                        xs_dec_pred_z_t], dim=-1)
-                    frames.append(vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).mul(255.).numpy().astype('uint8'))
+                    frames_val.append(vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).mul(255.).numpy().astype('uint8'))
+                    del frame
 
-                imageio.mimwrite(os.path.join(args.save_path, 'samples', f'val_vis_{itr:06d}.gif'), frames, fps=4)
+                imageio.mimwrite(os.path.join(args.save_path, 'samples', f'val_vis_{itr:06d}.gif'), frames_val, fps=4)
+                del xs_dec_z_val, xs_dec_pred_z_val, logpx_val, frames_val
 
                 # Plot
                 plt.plot(np.arange(1, itr+1), losses, '--', c='C0', alpha=0.7, label="loss")
@@ -432,6 +445,10 @@ if __name__ == '__main__':
                 plt.savefig(os.path.join(args.save_path, "loss.png"), bbox_inches='tight', pad_inches=0.1)
                 plt.clf()
                 plt.close()
+
+                # Garbage collection
+                gc.collect()
+                mem_check()
 
     except KeyboardInterrupt:
         print("Ctrl+C!\n")
