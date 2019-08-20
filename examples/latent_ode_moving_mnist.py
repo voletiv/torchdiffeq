@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.random as npr
 import os
+import random
 import time
 import torch
 import torch.nn as nn
@@ -17,8 +18,11 @@ import torch.nn.functional as F
 import torchvision.utils as vutils
 import tqdm
 
+from cv2 import putText
+
 from moving_mnist import *
 
+# python latent_ode_moving_mnist.py --num_of_samples 1000 --batch_size 100 --save_path /home/voletivi/scratch/ode/ODE_PLEASE_WORK_AGAIN --vis_step 50 --vis_n_vids 50
 
 # for i in tqdm.tqdm(range(10000)):
 #     this_dir = '/home/voletiv/Datasets/MyMovingMNIST/{:05d}'.format(i)
@@ -40,11 +44,12 @@ parser.add_argument('--num_digits', type=int, default=1)
 parser.add_argument('--n_frames_input', type=int, default=10)
 parser.add_argument('--n_frames_output', type=int, default=10)
 parser.add_argument('--adjoint', type=eval, default=False)
-parser.add_argument('--vis_step', type=int, default=10)
-parser.add_argument('--vis_n_vids', type=int, default=50, help="How many videos to visualize")
+parser.add_argument('--vis_step', type=int, default=50)
+parser.add_argument('--vis_n_vids', type=int, default=50, help="How many videos to visualize, must be <= batch_size")
 parser.add_argument('--niters', type=int, default=10000)
 parser.add_argument('--lr', type=float, default=0.0001)
 parser.add_argument('--gpu', type=int, default=0)
+parser.add_argument('--seed', type=int, default=0)
 args = parser.parse_args()
 
 assert args.vis_n_vids <= args.batch_size, "ERROR: vis_n_vids must be <= batch_size! Given vis_n_vids=" + str(args.vis_n_vids) + " ; batch_size=" + str(args.batch_size)
@@ -258,6 +263,10 @@ def mem_check():
 
 if __name__ == '__main__':
 
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
     if not os.path.exists(args.save_path):
         args.save_path = os.path.join(os.path.dirname(args.save_path), '{0:%Y%m%d_%H%M%S}_{1}'.format(datetime.datetime.now(), os.path.basename(args.save_path)))
         os.makedirs(args.save_path)
@@ -283,7 +292,8 @@ if __name__ == '__main__':
                                         n_workers=8)
     orig_trajs, samp_trajs, orig_ts, samp_ts = next(iter(dl))
     samp_trajs, samp_ts = samp_trajs.to(device), samp_ts.to(device)
-    orig_trajs_vis = orig_trajs[:args.vis_n_vids].to(device)
+    orig_trajs_vis = orig_trajs[:args.vis_n_vids]
+    orig_trajs_vis_gpu = orig_trajs_vis.clone().to(device)
 
     # Val data
     print("Loading val data")
@@ -312,7 +322,6 @@ if __name__ == '__main__':
     val_losses_ma_output = []
     ts_pos = np.linspace(0., 1., num=args.n_frames_input+args.n_frames_output)
     ts_pos = torch.from_numpy(ts_pos).float().to(device)
-    orig_xs = orig_trajs[:args.vis_n_vids]
 
     if args.save_path is not None:
         ckpt_path = os.path.join(args.save_path, 'ckpt.pth')
@@ -384,7 +393,7 @@ if __name__ == '__main__':
                 # Sampling from TRAIN data
                 # print("Sampling")
                 with torch.no_grad():
-                    z = enc(orig_trajs_vis[:args.vis_n_vids].view(-1, 1, 64, 64)).view(args.vis_n_vids, -1, latent_dim)   # BxTxdim
+                    z = enc(orig_trajs_vis_gpu.view(-1, 1, 64, 64)).view(args.vis_n_vids, -1, latent_dim)   # BxTxdim
                     xs_dec_z = dec(z)    # BxTx1x64x64
                     pred_z = odeint(func, z.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2) # BxTxdim
                     xs_dec_pred_z = dec(pred_z)    # BxTx1x64x64
@@ -394,14 +403,15 @@ if __name__ == '__main__':
 
                 frames = []
                 for t in range(xs_dec_pred_z.shape[1]):
-                    xs_t = orig_xs[:, t]                         # Bx64x64
-                    xs_dec_z_t = xs_dec_z[:, t]                  # Bx64x64
-                    xs_dec_pred_z_t = xs_dec_pred_z[:, t]      # Bx64x64
+                    xs_t = orig_trajs_vis[:, t]                        # Bx1x64x64
+                    xs_dec_z_t = xs_dec_z[:, t]                 # Bx1x64x64
+                    xs_dec_pred_z_t = xs_dec_pred_z[:, t]       # Bx1x64x64
                     frame = torch.cat([xs_t, torch.ones(args.vis_n_vids, 1, 64, 2),
                                        xs_dec_z_t, torch.ones(args.vis_n_vids, 1, 64, 2),
                                        xs_dec_pred_z_t], dim=-1)
-                    frames.append(vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).mul(255.).numpy().astype('uint8'))
-                    del frame
+                    gif_frame = vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).numpy()
+                    frames.append((putText(np.concatenate((np.ones((40, gif_frame.shape[1], gif_frame.shape[2])), gif_frame), axis=0), f"time = {t+1}", (8, 30), 0, 1, (0,0,0), 4)*255).astype('uint8'))
+                    del frame, gif_frame
 
                 imageio.mimwrite(os.path.join(args.save_path, 'samples', f'train_vis_{itr:06d}.gif'), frames, fps=4)
                 del xs_dec_z, xs_dec_pred_z, frames
@@ -439,8 +449,9 @@ if __name__ == '__main__':
                     frame = torch.cat([xs_t, torch.ones(args.vis_n_vids, 1, 64, 2),
                                        xs_dec_z_t, torch.ones(args.vis_n_vids, 1, 64, 2),
                                        xs_dec_pred_z_t], dim=-1)
-                    frames_val.append(vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).mul(255.).numpy().astype('uint8'))
-                    del frame
+                    gif_frame = vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).numpy()
+                    frames_val.append((putText(np.concatenate((np.ones((40, gif_frame.shape[1], gif_frame.shape[2])), gif_frame), axis=0), f"time = {t+1}", (8, 30), 0, 1, (0,0,0), 4)*255).astype('uint8'))
+                    del frame, gif_frame
 
                 imageio.mimwrite(os.path.join(args.save_path, 'samples', f'val_vis_{itr:06d}.gif'), frames_val, fps=4)
                 del xs_dec_z_val, xs_dec_pred_z_val, logpx_val_input, logpx_val_output, frames_val
