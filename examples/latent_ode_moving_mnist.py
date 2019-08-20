@@ -518,6 +518,7 @@ if __name__ == '__main__':
                 logpx_val_input += log_normal_pdf(z_val[:, :args.n_frames_input], pred_z_val[:, :args.n_frames_input], noise_logvar_z[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
                 val_loss_input = -logpx_val_input.item()
                 val_loss_meter_input.update(val_loss_input)
+
                 val_losses_input.append(val_loss_input)
                 val_losses_ma_input.append(val_loss_meter_input.avg)
 
@@ -525,6 +526,7 @@ if __name__ == '__main__':
                 logpx_val_output += log_normal_pdf(z_val[:, args.n_frames_input:], pred_z_val[:, args.n_frames_input:], noise_logvar_z[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
                 val_loss_output = -logpx_val_output.item()
                 val_loss_meter_output.update(val_loss_output)
+
                 val_losses_output.append(val_loss_output)
                 val_losses_ma_output.append(val_loss_meter_output.avg)
 
@@ -545,7 +547,7 @@ if __name__ == '__main__':
                 plt.yscale("symlog")
                 plt.xlabel("Iterations")
                 # plt.title("Losses")
-                plt.savefig(os.path.join(args.save_path, "loss.png"), bbox_inches='tight', pad_inches=0.1)
+                plt.savefig(os.path.join(args.save_path, "loss.png"), bbox_inches='tight', pad_inches=0.1, dpi=300)
                 plt.clf()
                 plt.close()
 
