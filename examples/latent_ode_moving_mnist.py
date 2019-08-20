@@ -19,6 +19,9 @@ import tqdm
 
 from moving_mnist import *
 
+from pathlib import Path
+import imageio
+
 
 # for i in tqdm.tqdm(range(10000)):
 #     this_dir = '/home/voletiv/Datasets/MyMovingMNIST/{:05d}'.format(i)
@@ -255,6 +258,105 @@ def mem_check():
     process = psutil.Process(os.getpid())
     print("Mem:", process.memory_info().rss/1024/1024/1024, "GB")
 
+# some utilitaries to save visual data (gifs, mp4s ...)
+def select_(tensors, dim, index):
+    """
+    Selects element at position `index` along the provided dimension `dim`.
+    """
+    return tuple(tensor.select(dim=dim, index=index) for tensor in tensors)
+
+
+def group_(tensors, padding, dim, pad_value=1):
+    """
+    Groups tensors along the provided dimension `dim` with some defined padding.
+    """
+    ref_tensor = tensors[0]
+    nb, nc, height, width = ref_tensor.size()
+    vpad = pad_value * torch.ones(size=(nb, nc, height, padding))
+    tsrs = list()
+    for i, tensor in enumerate(tensors):
+        if i == 0:
+            tsrs.append(tensor)
+        else:
+            tsrs.append(vpad)
+            tsrs.append(tensor)
+    group = torch.cat(tensors=tsrs, dim=dim)
+    return group
+
+
+def make_grid_(tensor, nrow=8, padding=2,
+               normalize=False, range=None, scale_each=False, pad_value=0):
+    """
+    Turns the provided batch of images (`tensor` of shape `[batch-size, n-channels, height, width]` ) into an grid of images.
+
+    :param tensor:
+    :param nrow:
+    :param padding:
+    :param normalize:
+    :param range:
+    :param scale_each:
+    :param pad_value:
+    :return:
+    """
+    # tensor is of shape BxCxHxW : [batch-size, n-channels, height, width]
+    grid = vutils.make_grid(tensor=tensor, nrow=nrow, padding=padding, pad_value=pad_value,
+                     normalize=normalize, range=range, scale_each=scale_each)
+    # add 0.5 after unnormalizing to [0, 255] to round to nearest integer
+    array = grid.mul_(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to("cpu", torch.uint8).numpy()
+    return array
+
+
+class Writer(object):
+
+    def __init__(self, select_dim, group_dim, group_padding=2, group_pad_value=1, nrows=8, grid_padding=8,
+                 grid_pad_value=0, fps=4, dpi=300):
+        self.select_dim = select_dim
+        self.group_dim = group_dim
+        self.group_pad = group_padding
+        self.group_pad_value = group_pad_value
+        self.nrows = nrows
+        self.grid_padding = grid_padding
+        self.grid_pad_value = grid_pad_value
+        self.fps = fps
+        self.dpi = dpi
+
+    def __process(self, inputs):
+        outputs = []
+        _range = range(inputs[0].size(self.select_dim))
+        for t in _range:
+
+            # 
+            tensors = select_(tensors=inputs, dim=self.select_dim, index=t)
+            group = group_(tensors=tensors, dim=self.group_dim, padding=self.group_pad, pad_value=self.group_pad_value)
+            grid = make_grid_(tensor=group, nrow=self.nrows, padding=self.grid_padding, pad_value=self.grid_pad_value)
+
+            # 
+            fig, ax = plt.subplots(nrows=1, ncols=1, dpi=self.dpi)
+            ax.imshow(grid)
+            ax.set_title(f"time: {t-_range[0]}")
+            ax.axis("off")
+
+            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+            # draw the renderer
+            fig.canvas.draw_idle()
+        
+            #get the GBA buffer from the figure
+            w, h = fig.canvas.get_width_height()
+            buf = np.fromstring( fig.canvas.tostring_rgb(), dtype=np.uint8 )
+            plt.close()
+
+            buf = buf.reshape([h, w, 3])
+            outputs.append(buf)
+        return outputs
+
+    def save(self, tensors, uri):
+        sequences = self.__process(inputs=tensors)        
+        imageio.mimwrite(uri=uri, ims=sequences, fps=self.fps)
+
+    def __call__(self, tensors, uri):
+        self.save(tensors=tensors, uri=uri)
+
 
 if __name__ == '__main__':
 
@@ -281,6 +383,9 @@ if __name__ == '__main__':
     dl = moving_mnist_ode_data_loader(args.data_path, num_objects=[args.num_digits], batch_size=args.num_of_samples,
                                         n_frames_input=args.n_frames_input, n_frames_output=args.n_frames_output,
                                         n_workers=8)
+                                        
+    data_writer = Writer(select_dim=1, group_dim=-1, group_padding=2, group_pad_value=1, grid_padding=8, grid_pad_value=1, fps=2)
+
     orig_trajs, samp_trajs, orig_ts, samp_ts = next(iter(dl))
     samp_trajs, samp_ts = samp_trajs.to(device), samp_ts.to(device)
     orig_trajs_vis = orig_trajs[:args.vis_n_vids].to(device)
@@ -294,7 +399,6 @@ if __name__ == '__main__':
     # Model
     print("Making models")
     func = LatentODEfunc(latent_dim, nhidden).to(device)
-    # enc = EncoderRNN(latent_dim, obs_dim, rnn_nhidden).to(device)
     enc = Encoder(latent_dim, obs_dim, nhidden).to(device)
     dec = Decoder(latent_dim, obs_dim, nhidden).to(device)
     params = (list(func.parameters()) + list(dec.parameters()) + list(enc.parameters()))
@@ -391,20 +495,10 @@ if __name__ == '__main__':
 
                 xs_dec_z = xs_dec_z.cpu()
                 xs_dec_pred_z = xs_dec_pred_z.cpu()
+                
+                data_writer.save(tensors=[orig_xs, xs_dec_z, xs_dec_pred_z], uri=Path(args.save_path) / "samples" / "train" / f"vis_{itr:06d}.gif")
+                del xs_dec_z, xs_dec_pred_z
 
-                frames = []
-                for t in range(xs_dec_pred_z.shape[1]):
-                    xs_t = orig_xs[:, t]                         # Bx64x64
-                    xs_dec_z_t = xs_dec_z[:, t]                  # Bx64x64
-                    xs_dec_pred_z_t = xs_dec_pred_z[:, t]      # Bx64x64
-                    frame = torch.cat([xs_t, torch.ones(args.vis_n_vids, 1, 64, 2),
-                                       xs_dec_z_t, torch.ones(args.vis_n_vids, 1, 64, 2),
-                                       xs_dec_pred_z_t], dim=-1)
-                    frames.append(vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).mul(255.).numpy().astype('uint8'))
-                    del frame
-
-                imageio.mimwrite(os.path.join(args.save_path, 'samples', f'train_vis_{itr:06d}.gif'), frames, fps=4)
-                del xs_dec_z, xs_dec_pred_z, frames
 
                 # Sampling from VAL data
                 # print("Sampling")
@@ -431,19 +525,8 @@ if __name__ == '__main__':
                 xs_dec_z_val = xs_dec_z_val.cpu()
                 xs_dec_pred_z_val = xs_dec_pred_z_val.cpu()
 
-                frames_val = []
-                for t in range(xs_dec_pred_z_val.shape[1]):
-                    xs_t = orig_trajs_val[:, t]                         # Bx64x64
-                    xs_dec_z_t = xs_dec_z_val[:, t]                  # Bx64x64
-                    xs_dec_pred_z_t = xs_dec_pred_z_val[:, t]      # Bx64x64
-                    frame = torch.cat([xs_t, torch.ones(args.vis_n_vids, 1, 64, 2),
-                                       xs_dec_z_t, torch.ones(args.vis_n_vids, 1, 64, 2),
-                                       xs_dec_pred_z_t], dim=-1)
-                    frames_val.append(vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).mul(255.).numpy().astype('uint8'))
-                    del frame
-
-                imageio.mimwrite(os.path.join(args.save_path, 'samples', f'val_vis_{itr:06d}.gif'), frames_val, fps=4)
-                del xs_dec_z_val, xs_dec_pred_z_val, logpx_val_input, logpx_val_output, frames_val
+                data_writer.save(tensors=[orig_trajs_val, xs_dec_z_val, xs_dec_pred_z_val], uri=Path(args.save_path) / "samples" / "valid" / f"vis_{itr:06d}.gif")
+                del xs_dec_z_val, xs_dec_pred_z_val
 
                 # Plot
                 plt.plot(np.arange(1, itr+1), losses, '--', c='C0', alpha=0.7, label="loss")
