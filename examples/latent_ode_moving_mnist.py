@@ -306,6 +306,12 @@ def make_grid_(tensor, nrow=8, padding=2,
     return array
 
 
+def sampler(x):
+    while True:
+        for e in x:
+            yield e
+
+
 class Writer(object):
 
     def __init__(self, select_dim, group_dim, group_padding=2, group_pad_value=1, nrows=8, grid_padding=8,
@@ -383,16 +389,16 @@ if __name__ == '__main__':
     dl = moving_mnist_ode_data_loader(args.data_path, num_objects=[args.num_digits], batch_size=args.num_of_samples,
                                         n_frames_input=args.n_frames_input, n_frames_output=args.n_frames_output,
                                         n_workers=8)
-                                        
+    data_loader = sampler(dl)
     data_writer = Writer(select_dim=1, group_dim=-1, group_padding=2, group_pad_value=1, grid_padding=8, grid_pad_value=1, fps=2)
 
-    orig_trajs, samp_trajs, orig_ts, samp_ts = next(iter(dl))
+    orig_trajs, samp_trajs, orig_ts, samp_ts = next(data_loader)
     samp_trajs, samp_ts = samp_trajs.to(device), samp_ts.to(device)
     orig_trajs_vis = orig_trajs[:args.vis_n_vids].to(device)
 
     # Val data
     print("Loading val data")
-    orig_trajs_val, _, orig_ts_val, _ = next(iter(dl))
+    orig_trajs_val, _, orig_ts_val, _ = next(data_loader)
     orig_trajs_val = orig_trajs_val[:args.vis_n_vids]
     orig_trajs_val_gpu = orig_trajs_val.clone().to(device)
 
