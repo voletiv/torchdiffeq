@@ -22,7 +22,7 @@ from cv2 import putText
 
 from moving_mnist import *
 
-# python latent_ode_moving_mnist.py --num_of_vids 1000 --batch_size 100 --save_path /home/voletivi/scratch/ode/ODE_SKIP_l1 --skip_level 1 --vis_step 50 --vis_n_vids 50
+# python latent_ode_moving_mnist.py --num_of_vids 1000 --batch_size 100 --save_path /home/voletivi/scratch/ode/ODE_SKIPcat_l1 --skip_level 1 --vis_step 50 --vis_n_vids 50
 
 # for i in tqdm.tqdm(range(10000)):
 #     this_dir = '/home/voletiv/Datasets/MyMovingMNIST/{:05d}'.format(i)
@@ -225,10 +225,10 @@ class Decoder(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.fc1 = nn.Linear(latent_dim, nhidden)
         self.fc2 = nn.Linear(nhidden, obs_dim)
-        self.res_block1 = ResBlock(64*(1 + self.skip_level==4), 64, 2, 'upsample')
-        self.res_block2 = ResBlock(64*(1 + self.skip_level==3), 32, 2, 'upsample')
-        self.res_block3 = ResBlock(32*(1 + self.skip_level==2), 16, 2, 'upsample')
-        self.res_block4 = ResBlock(16*(1 + self.skip_level==1), 1, 2, 'upsample')
+        self.res_block1 = ResBlock(64*(1 + int(self.skip_level==4)), 64, 2, 'upsample')
+        self.res_block2 = ResBlock(64*(1 + int(self.skip_level==3)), 32, 2, 'upsample')
+        self.res_block3 = ResBlock(32*(1 + int(self.skip_level==2)), 16, 2, 'upsample')
+        self.res_block4 = ResBlock(16*(1 + int(self.skip_level==1)), 1, 2, 'upsample')
         self.tanh = nn.Tanh()
 
     def forward(self, z, feats):
