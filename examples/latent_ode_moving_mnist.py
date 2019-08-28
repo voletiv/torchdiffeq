@@ -22,7 +22,7 @@ from cv2 import putText
 
 from moving_mnist import *
 
-# python latent_ode_moving_mnist.py --num_of_samples 1000 --batch_size 100 --save_path /home/voletivi/scratch/ode/ODE_PLEASE_WORK_AGAIN --vis_step 50 --vis_n_vids 50
+# python latent_ode_moving_mnist.py --num_of_vids 1000 --batch_size 100 --save_path /home/voletivi/scratch/ode/ODE_PLEASE_WORK_AGAIN --vis_step 50 --vis_n_vids 50
 
 # for i in tqdm.tqdm(range(10000)):
 #     this_dir = '/home/voletiv/Datasets/MyMovingMNIST/{:05d}'.format(i)
@@ -38,18 +38,29 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--data_path', type=str, default='.',
                     help="Path where 'train-images-idx3-ubyte.gz' can be found") # http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz
 parser.add_argument('--save_path', type=str, default='./ODE_MMNIST_EXP1')
-parser.add_argument('--num_of_samples', type=int, default=1000)
+parser.add_argument('--num_of_vids', type=int, default=1000)
+parser.add_argument('--skip_level', type=int, choices=[1, 2, 3, 4], default=4)
+# Training
 parser.add_argument('--batch_size', type=int, default=100)
+parser.add_argument('--lr', type=float, default=0.0001)
+parser.add_argument('--latent_dim', type=int, default=128)
+parser.add_argument('--obs_dim', type=int, default=1024)
+parser.add_argument('--nhidden', type=int, default=256)
+parser.add_argument('--gpu', type=int, default=0)
+parser.add_argument('--seed', type=int, default=0)
+# Data
 parser.add_argument('--num_digits', type=int, default=1)
 parser.add_argument('--n_frames_input', type=int, default=10)
 parser.add_argument('--n_frames_output', type=int, default=10)
+parser.add_argument('--imsize', type=int, default=64)
+parser.add_argument('--im_ch', type=int, default=1)
+
 parser.add_argument('--adjoint', type=eval, default=False)
+
 parser.add_argument('--vis_step', type=int, default=50)
 parser.add_argument('--vis_n_vids', type=int, default=50, help="How many videos to visualize, must be <= batch_size")
 parser.add_argument('--niters', type=int, default=10000)
-parser.add_argument('--lr', type=float, default=0.0001)
-parser.add_argument('--gpu', type=int, default=0)
-parser.add_argument('--seed', type=int, default=0)
+
 args = parser.parse_args()
 
 assert args.vis_n_vids <= args.batch_size, "ERROR: vis_n_vids must be <= batch_size! Given vis_n_vids=" + str(args.vis_n_vids) + " ; batch_size=" + str(args.batch_size)
@@ -141,63 +152,76 @@ class ResBlock(nn.Module):
         return out + shortcut
 
 
-class EncoderRNN(nn.Module):
+# class EncoderRNN(nn.Module):
 
-    def __init__(self, latent_dim=4, obs_dim=16, nhidden=25):
-        super(EncoderRNN, self).__init__()
-        self.latent_dim = latent_dim
-        self.obs_dim = obs_dim
-        self.nhidden = nhidden
-        self.res_block1 = ResBlock(1, 16, 2, 'downsample')    # 32x32
-        self.res_block2 = ResBlock(16, 32, 2, 'downsample')    # 16x16
-        self.res_block3 = ResBlock(32, 64, 2, 'downsample')    # 8x8
-        self.res_block4 = ResBlock(64, 2, 2, 'downsample')    # 4x4; 2*4*4 = 32 = 2*obs_dim
-        self.i2h = nn.Linear(2*obs_dim + nhidden, nhidden)
-        self.h2o = nn.Linear(nhidden, latent_dim * 2)
+#     def __init__(self, latent_dim=4, obs_dim=16, nhidden=25):
+#         super(EncoderRNN, self).__init__()
+#         self.latent_dim = latent_dim
+#         self.obs_dim = obs_dim
+#         self.nhidden = nhidden
+#         self.res_block1 = ResBlock(1, 16, 2, 'downsample')    # 32x32
+#         self.res_block2 = ResBlock(16, 32, 2, 'downsample')    # 16x16
+#         self.res_block3 = ResBlock(32, 64, 2, 'downsample')    # 8x8
+#         self.res_block4 = ResBlock(64, 2, 2, 'downsample')    # 4x4; 2*4*4 = 32 = 2*obs_dim
+#         self.i2h = nn.Linear(2*obs_dim + nhidden, nhidden)
+#         self.h2o = nn.Linear(nhidden, latent_dim * 2)
 
-    def forward(self, x, h):
-        bs = x.shape[0]
-        x = self.res_block4(self.res_block3(self.res_block2(self.res_block1(x))))
-        x = x.view(bs, -1)
-        combined = torch.cat((x, h), dim=1)
-        h = torch.tanh(self.i2h(combined))
-        out = self.h2o(h)
-        return out, h
+#     def forward(self, x, h):
+#         bs = x.shape[0]
+#         x = self.res_block4(self.res_block3(self.res_block2(self.res_block1(x))))
+#         x = x.view(bs, -1)
+#         combined = torch.cat((x, h), dim=1)
+#         h = torch.tanh(self.i2h(combined))
+#         out = self.h2o(h)
+#         return out, h
 
-    def initHidden(self, batch_size):
-        return torch.zeros(batch_size, self.nhidden)
+#     def initHidden(self, batch_size):
+#         return torch.zeros(batch_size, self.nhidden)
 
 
 class Encoder(nn.Module):
 
-    def __init__(self, latent_dim=128, obs_dim=1024, nhidden=256):
+    def __init__(self, latent_dim=128, obs_dim=1024, nhidden=256, skip_level=1):
         super(Encoder, self).__init__()
         self.latent_dim = latent_dim
         self.obs_dim = obs_dim
         self.nhidden = nhidden
-        self.res_block1 = ResBlock(1, 16, 2, 'downsample')    # 32x32
-        self.res_block2 = ResBlock(16, 32, 2, 'downsample')    # 16x16
-        self.res_block3 = ResBlock(32, 64, 2, 'downsample')    # 8x8
-        self.res_block4 = ResBlock(64, 64, 2, 'downsample')    # 4x4; 4*4*64 = 1024 = obs_dim
+        self.skip_level = skip_level
+        self.res_block1 = ResBlock(1, 16, 2, 'downsample')      # 32x32 <-- 64x64
+        self.res_block2 = ResBlock(16, 32, 2, 'downsample')     # 16x16
+        self.res_block3 = ResBlock(32, 64, 2, 'downsample')     # 8x8
+        self.res_block4 = ResBlock(64, 64, 2, 'downsample')     # 4x4; 4*4*64 = 1024 = obs_dim
         self.i2h = nn.Linear(obs_dim, nhidden)
         self.h2o = nn.Linear(nhidden, latent_dim)
 
     def forward(self, x):
-        bs = x.shape[0]
-        x = self.res_block4(self.res_block3(self.res_block2(self.res_block1(x))))
-        x = x.view(-1, self.obs_dim)
+        # bs = x.shape[0]
+        x1 = self.res_block1(x)     # 32x32
+        x2 = self.res_block2(x1)    # 16x16
+        x3 = self.res_block3(x2)    # 8x8
+        x4 = self.res_block4(x3)    # 4x4
+        x = x4.view(-1, self.obs_dim)
         h = torch.tanh(self.i2h(x))
         out = self.h2o(h)
-        return out
+        if self.skip_level == 1:
+            feats = x1
+        elif self.skip_level == 2:
+            feats = x2
+        elif self.skip_level == 3:
+            feats = x3
+        elif self.skip_level == 4:
+            feats = x4
+        return out, feats
 
 
 class Decoder(nn.Module):
 
-    def __init__(self, latent_dim=128, obs_dim=1024, nhidden=256):
+    def __init__(self, latent_dim=128, obs_dim=1024, nhidden=256, skip_level=1):
         super(Decoder, self).__init__()
         self.latent_dim = latent_dim
         self.obs_dim = obs_dim
         self.nhidden = nhidden
+        self.skip_level = skip_level
         self.relu = nn.ReLU(inplace=True)
         self.fc1 = nn.Linear(latent_dim, nhidden)
         self.fc2 = nn.Linear(nhidden, obs_dim)
@@ -207,13 +231,24 @@ class Decoder(nn.Module):
         self.res_block4 = ResBlock(16, 1, 2, 'upsample')
         self.tanh = nn.Tanh()
 
-    def forward(self, z):
+    def forward(self, z, feats):
         bs = z.shape[0]
         out = self.fc1(z)
         out = self.relu(out)
         out = self.fc2(out)
         out = out.view(-1, 64, 4, 4)
-        out = self.res_block4(self.res_block3(self.res_block2(self.res_block1(out))))
+        if self.skip_level == 4:
+            out += feats
+        out = self.res_block1(out)
+        if self.skip_level == 3:
+            out += feats
+        out = self.res_block2(out)
+        if self.skip_level == 2:
+            out += feats
+        out = self.res_block3(out)
+        if self.skip_level == 1:
+            out += feats
+        out = self.res_block4(out)
         out = self.tanh(out)
         out = out.view(bs, -1, 1, 64, 64)
         return out
@@ -263,7 +298,7 @@ def mem_check():
 
 if __name__ == '__main__':
 
-    np.random.seed(args.seed)
+    np.random.seed (args.seed)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
@@ -272,22 +307,16 @@ if __name__ == '__main__':
         os.makedirs(args.save_path)
         os.makedirs(os.path.join(args.save_path, 'samples'))
 
-    latent_dim = 128
-    obs_dim = 1024
-    # rnn_nhidden = 50
-    nhidden = 256
     start = 0.
     stop = 1.
     noise_std = .3
-    a = 0.
-    b = .3
     device = torch.device('cuda:' + str(args.gpu)
                           if torch.cuda.is_available() else 'cpu')
     print("device:", device)
 
     # Data
     print("Loading data")
-    dl = moving_mnist_ode_data_loader(args.data_path, num_objects=[args.num_digits], batch_size=args.num_of_samples,
+    dl = moving_mnist_ode_data_loader(args.data_path, num_objects=[args.num_digits], batch_size=args.num_of_vids,
                                         n_frames_input=args.n_frames_input, n_frames_output=args.n_frames_output,
                                         n_workers=8)
     orig_trajs, samp_trajs, orig_ts, samp_ts = next(iter(dl))
@@ -303,10 +332,10 @@ if __name__ == '__main__':
 
     # Model
     print("Making models")
-    func = LatentODEfunc(latent_dim, nhidden).to(device)
+    func = LatentODEfunc(args.latent_dim, args.nhidden).to(device)
     # enc = EncoderRNN(latent_dim, obs_dim, rnn_nhidden).to(device)
-    enc = Encoder(latent_dim, obs_dim, nhidden).to(device)
-    dec = Decoder(latent_dim, obs_dim, nhidden).to(device)
+    enc = Encoder(args.latent_dim, args.obs_dim, args.nhidden, args.skip_level).to(device)
+    dec = Decoder(args.latent_dim, args.obs_dim, args.nhidden, args.skip_level).to(device)
     params = (list(func.parameters()) + list(dec.parameters()) + list(enc.parameters()))
     optimizer = optim.Adam(params, lr=args.lr)
 
@@ -320,7 +349,7 @@ if __name__ == '__main__':
     val_loss_meter_output = RunningAverageMeter(momentum=0.9)
     val_losses_output = []
     val_losses_ma_output = []
-    ts_pos = np.linspace(0., 1., num=args.n_frames_input+args.n_frames_output)
+    ts_pos = np.linspace(start, stop, num=args.n_frames_input+args.n_frames_output)
     ts_pos = torch.from_numpy(ts_pos).float().to(device)
 
     if args.save_path is not None:
@@ -340,17 +369,17 @@ if __name__ == '__main__':
     log_file_name = os.path.join(args.save_path, 'log.txt')
     log_file = open(log_file_name, "wt")
 
-    noise_std_ = torch.zeros(args.batch_size, args.n_frames_input, 1, 64, 64) + noise_std
+    noise_std_ = torch.zeros(args.batch_size, args.n_frames_input, args.im_ch, args.imsize, args.imsize) + noise_std
     noise_logvar = 2. * torch.log(noise_std_).to(device)
-    noise_std_z = torch.zeros(args.batch_size, args.n_frames_input, latent_dim) + noise_std
+    noise_std_z = torch.zeros(args.batch_size, args.n_frames_input, args.latent_dim) + noise_std
     noise_logvar_z = 2. * torch.log(noise_std_z).to(device)
 
     try:
         print("Starting training...")
-        n_batches = args.num_of_samples//args.batch_size
+        n_batches = args.num_of_vids//args.batch_size
         print("n_batches", n_batches)
 
-        vid_ids = np.arange(args.num_of_samples)
+        vid_ids = np.arange(args.num_of_vids)
 
         for itr in range(1, args.niters + 1):
             total_loss = 0
@@ -360,12 +389,14 @@ if __name__ == '__main__':
             for b in range(n_batches):
                 # print("itr", itr)
                 optimizer.zero_grad()
-                z = enc(samp_trajs[vid_ids[b*args.batch_size:(b+1)*args.batch_size]].view(-1, 1, 64, 64)).view(args.batch_size, -1, latent_dim)
+                z, feats = enc(samp_trajs[vid_ids[b*args.batch_size:(b+1)*args.batch_size]].view(-1, args.im_ch, args.imsize, args.imsize))     # B*Txdim
+                z = z.view(args.batch_size, -1, args.latent_dim)    # BxTxdim
+                feats = feats.view(args.batch_size, -1, *feats.shape[1:])[:, 0:1].expand(args.batch_size, feats.shape[0]//args.batch_size, *feats.shape[1:]).contiguous().view(-1, *feats.shape[1:])
                 # forward in time and solve ode for reconstructions
                 # print("doing ode")
-                pred_z = odeint(func, z.permute(1, 0, 2)[0], samp_ts).permute(1, 0, 2)     # B x T x dim
+                pred_z = odeint(func, z.permute(1, 0, 2)[0], samp_ts).permute(1, 0, 2)     # BxTxdim
                 # print("decoding after ode")
-                pred_x = dec(pred_z)    # BxTx1x64x64
+                pred_x = dec(pred_z, feats)    # BxTx1x64x64
 
                 # compute loss
                 # print("computing loss")
@@ -393,10 +424,12 @@ if __name__ == '__main__':
                 # Sampling from TRAIN data
                 # print("Sampling")
                 with torch.no_grad():
-                    z = enc(orig_trajs_vis_gpu.view(-1, 1, 64, 64)).view(args.vis_n_vids, -1, latent_dim)   # BxTxdim
-                    xs_dec_z = dec(z)    # BxTx1x64x64
+                    z, feats = enc(orig_trajs_vis_gpu.view(-1, args.im_ch, args.imsize, args.imsize))   # B*Txdim
+                    z = z.view(args.vis_n_vids, -1, args.latent_dim)    # BxTxdim
+                    feats = feats.view(args.vis_n_vids, -1, *feats.shape[1:])[:, 0:1].expand(args.vis_n_vids, feats.shape[0]//args.vis_n_vids, *feats.shape[1:]).contiguous().view(-1, *feats.shape[1:])
+                    xs_dec_z = dec(z, feats)    # BxTx1x64x64
                     pred_z = odeint(func, z.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2) # BxTxdim
-                    xs_dec_pred_z = dec(pred_z)    # BxTx1x64x64
+                    xs_dec_pred_z = dec(pred_z, feats)    # BxTx1x64x64
 
                 xs_dec_z = xs_dec_z.cpu()
                 xs_dec_pred_z = xs_dec_pred_z.cpu()
@@ -418,11 +451,14 @@ if __name__ == '__main__':
 
                 # Sampling from VAL data
                 # print("Sampling")
+                # import pdb; pdb.set_trace()
                 with torch.no_grad():
-                    z_val = enc(orig_trajs_val_gpu.view(-1, 1, 64, 64)).view(args.vis_n_vids, -1, latent_dim)   # BxTxdim
-                    xs_dec_z_val = dec(z_val)    # BxTx1x64x64
+                    z_val, feats_val = enc(orig_trajs_val_gpu.view(-1, args.im_ch, args.imsize, args.imsize))   # BxTxdim
+                    z_val = z_val.view(args.vis_n_vids, -1, args.latent_dim)    # BxTxdim
+                    feats_val = feats_val.view(args.vis_n_vids, -1, *feats_val.shape[1:])[:, 0:1].expand(args.vis_n_vids, feats_val.shape[0]//args.vis_n_vids, *feats_val.shape[1:]).contiguous().view(-1, *feats_val.shape[1:])
+                    xs_dec_z_val = dec(z_val, feats_val)    # BxTx1x64x64
                     pred_z_val = odeint(func, z_val.permute(1, 0, 2)[0], ts_pos).permute(1, 0, 2) # BxTxdim
-                    xs_dec_pred_z_val = dec(pred_z_val)    # BxTx1x64x64
+                    xs_dec_pred_z_val = dec(pred_z_val, feats_val)  # BxTx1x64x64
 
                 logpx_val_input = log_normal_pdf(orig_trajs_val_gpu[:, :args.n_frames_input], xs_dec_pred_z_val[:, :args.n_frames_input], noise_logvar[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
                 logpx_val_input += log_normal_pdf(z_val[:, :args.n_frames_input], pred_z_val[:, :args.n_frames_input], noise_logvar_z[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
@@ -446,8 +482,8 @@ if __name__ == '__main__':
                     xs_t = orig_trajs_val[:, t]                         # Bx64x64
                     xs_dec_z_t = xs_dec_z_val[:, t]                  # Bx64x64
                     xs_dec_pred_z_t = xs_dec_pred_z_val[:, t]      # Bx64x64
-                    frame = torch.cat([xs_t, torch.ones(args.vis_n_vids, 1, 64, 2),
-                                       xs_dec_z_t, torch.ones(args.vis_n_vids, 1, 64, 2),
+                    frame = torch.cat([xs_t, torch.ones(args.vis_n_vids, args.im_ch, args.imsize, 2),
+                                       xs_dec_z_t, torch.ones(args.vis_n_vids, args.im_ch, args.imsize, 2),
                                        xs_dec_pred_z_t], dim=-1)
                     gif_frame = vutils.make_grid(frame, nrow=5, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).numpy()
                     frames_val.append((putText(np.concatenate((np.ones((40, gif_frame.shape[1], gif_frame.shape[2])), gif_frame), axis=0), f"time = {t+1}", (8, 30), 0, 1, (0,0,0), 4)*255).astype('uint8'))
