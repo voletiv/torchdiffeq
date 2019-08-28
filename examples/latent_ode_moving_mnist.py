@@ -22,7 +22,7 @@ from cv2 import putText
 
 from moving_mnist import *
 
-# python latent_ode_moving_mnist.py --num_of_vids 1000 --batch_size 100 --save_path /home/voletivi/scratch/ode/ODE_PLEASE_WORK_AGAIN --vis_step 50 --vis_n_vids 50
+# python latent_ode_moving_mnist.py --num_of_vids 1000 --batch_size 100 --save_path /home/voletivi/scratch/ode/ODE_SKIP_l1 --skip_level 1 --vis_step 50 --vis_n_vids 50
 
 # for i in tqdm.tqdm(range(10000)):
 #     this_dir = '/home/voletiv/Datasets/MyMovingMNIST/{:05d}'.format(i)
@@ -225,10 +225,10 @@ class Decoder(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.fc1 = nn.Linear(latent_dim, nhidden)
         self.fc2 = nn.Linear(nhidden, obs_dim)
-        self.res_block1 = ResBlock(64, 64, 2, 'upsample')
-        self.res_block2 = ResBlock(64, 32, 2, 'upsample')
-        self.res_block3 = ResBlock(32, 16, 2, 'upsample')
-        self.res_block4 = ResBlock(16, 1, 2, 'upsample')
+        self.res_block1 = ResBlock(64*(1 + self.skip_level==4), 64, 2, 'upsample')
+        self.res_block2 = ResBlock(64*(1 + self.skip_level==3), 32, 2, 'upsample')
+        self.res_block3 = ResBlock(32*(1 + self.skip_level==2), 16, 2, 'upsample')
+        self.res_block4 = ResBlock(16*(1 + self.skip_level==1), 1, 2, 'upsample')
         self.tanh = nn.Tanh()
 
     def forward(self, z, feats):
@@ -238,16 +238,16 @@ class Decoder(nn.Module):
         out = self.fc2(out)
         out = out.view(-1, 64, 4, 4)
         if self.skip_level == 4:
-            out += feats
+            out = torch.cat((out, feats), dim=1)
         out = self.res_block1(out)
         if self.skip_level == 3:
-            out += feats
+            out = torch.cat((out, feats), dim=1)
         out = self.res_block2(out)
         if self.skip_level == 2:
-            out += feats
+            out = torch.cat((out, feats), dim=1)
         out = self.res_block3(out)
         if self.skip_level == 1:
-            out += feats
+            out = torch.cat((out, feats), dim=1)
         out = self.res_block4(out)
         out = self.tanh(out)
         out = out.view(bs, -1, 1, 64, 64)
