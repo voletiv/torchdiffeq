@@ -22,7 +22,7 @@ from cv2 import putText
 
 from moving_mnist import *
 
-# python latent_ode_moving_mnist.py --num_of_vids 1000 --batch_size 128 --save_path /home/voletivi/scratch/ode/ODE_RNNEnc --vis_step 100 --vis_n_vids 50
+# python latent_ode_moving_mnist.py --n_vids 1000 --batch_size 128 --save_path /home/voletivi/scratch/ode/ODE_RNNEnc --vis_step 100 --vis_n_vids 50
 
 # for i in tqdm.tqdm(range(10000)):
 #     this_dir = '/home/voletiv/Datasets/MyMovingMNIST/{:05d}'.format(i)
@@ -38,7 +38,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--data_path', type=str, default='.',
                     help="Path where 'train-images-idx3-ubyte.gz' can be found") # http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz
 parser.add_argument('--save_path', type=str, default='./ODE_MMNIST_EXP1')
-parser.add_argument('--num_of_vids', type=int, default=1000)
+parser.add_argument('--n_vids', type=int, default=1000)
 parser.add_argument('--seed', type=int, default=0)
 # Model, training
 parser.add_argument('--batch_size', type=int, default=128)
@@ -343,7 +343,11 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
 
     if not os.path.exists(args.save_path):
-        args.save_path = os.path.join(os.path.dirname(args.save_path), '{0:%Y%m%d_%H%M%S}_{1}'.format(datetime.datetime.now(), os.path.basename(args.save_path)))
+        args.save_path = os.path.join(os.path.dirname(args.save_path),
+            f'{datetime.datetime.now():%Y%m%d_%H%M%S}_{os.path.basename(args.save_path)}_nVids{args.n_vids}_nRes{args.n_res_blocks}_')
+        for i in range(args.n_res_blocks):
+            args.save_path += f'{args.res_ch[i]}_'
+        args.save_path += f'hid{args.nhidden}_z{args.latent_dim}_skip{args.skip_level}_bs{args.batch_size}_lr{args.lr}_seed{args.seed}'
         os.makedirs(args.save_path)
         os.makedirs(os.path.join(args.save_path, 'samples'))
 
@@ -356,7 +360,7 @@ if __name__ == '__main__':
 
     # Data
     print("Loading data")
-    dl = moving_mnist_ode_data_loader(args.data_path, num_objects=[args.num_digits], batch_size=args.num_of_vids,
+    dl = moving_mnist_ode_data_loader(args.data_path, num_objects=[args.num_digits], batch_size=args.n_vids,
                                         n_frames_input=args.n_frames_input, n_frames_output=args.n_frames_output,
                                         num_workers=args.num_workers)
     orig_trajs, samp_trajs, orig_ts, samp_ts = next(iter(dl))
@@ -416,10 +420,10 @@ if __name__ == '__main__':
 
     try:
         print("Starting training...")
-        n_batches = args.num_of_vids//args.batch_size
+        n_batches = args.n_vids//args.batch_size
         print("n_batches", n_batches)
 
-        vid_ids = np.arange(args.num_of_vids)
+        vid_ids = np.arange(args.n_vids)
 
         for epoch in range(1, args.n_epochs + 1):
             total_loss = 0
