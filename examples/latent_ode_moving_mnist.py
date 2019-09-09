@@ -22,7 +22,7 @@ from cv2 import putText
 
 from moving_mnist import *
 
-# python latent_ode_moving_mnist.py --n_vids 1000 --batch_size 128 --save_path /home/voletivi/scratch/ode/ODE_RNNEnc --vis_step 100 --vis_n_vids 50
+# python latent_ode_moving_mnist.py --save_path /home/voletivi/scratch/ode/ODE_RNNEnc --n_vids 1000 --batch_size 128 --n_res_blocks 4 --res_ch 4 8 16 16 --nhidden 128 --latent_dim 16 --vis_step 100 --vis_n_vids 50 --num_workers 8 --seed 0
 
 # for i in tqdm.tqdm(range(10000)):
 #     this_dir = '/home/voletiv/Datasets/MyMovingMNIST/{:05d}'.format(i)
@@ -475,6 +475,7 @@ if __name__ == '__main__':
             losses_ma.append(loss_meter.avg)
 
             log = 'Epoch: {}, running avg loss: {:.4f}\n'.format(epoch, loss_meter.avg)
+            print(args.save_path)
             print(log)
             log_file.write(log)
             log_file.flush()
@@ -490,7 +491,7 @@ if __name__ == '__main__':
                     # feats = feats.view(args.vis_n_vids, -1, *feats.shape[1:])[:, 0:1].expand(args.vis_n_vids, feats.shape[0]//args.vis_n_vids, *feats.shape[1:]).contiguous().view(-1, *feats.shape[1:])
                     # xs_dec_z = dec(z, feats)    # BxTx1x64x64
                     h = enc.initHidden(args.vis_n_vids).to(device)
-                    for t in reversed(range(orig_trajs_vis_gpu.size(1))):
+                    for t in reversed(range(orig_trajs_vis_gpu.size(1)//2)):
                         obs = orig_trajs_vis_gpu[:, t, :]
                         out, h, feats = enc.forward(obs, h)
                     qz0_mean, qz0_logvar = out[:, :args.latent_dim], out[:, args.latent_dim:]
@@ -525,7 +526,7 @@ if __name__ == '__main__':
                     # feats_val = feats_val.view(args.vis_n_vids, -1, *feats_val.shape[1:])[:, 0:1].expand(args.vis_n_vids, feats_val.shape[0]//args.vis_n_vids, *feats_val.shape[1:]).contiguous().view(-1, *feats_val.shape[1:])
                     # xs_dec_z_val = dec(z_val, feats_val)    # BxTx1x64x64
                     h = enc.initHidden(args.vis_n_vids).to(device)
-                    for t in reversed(range(orig_trajs_val_gpu.size(1))):
+                    for t in reversed(range(orig_trajs_val_gpu.size(1)//2)):
                         obs = orig_trajs_val_gpu[:, t, :]
                         out, h, feats = enc.forward(obs, h)
                     qz0_mean_val, qz0_logvar_val = out[:, :args.latent_dim], out[:, args.latent_dim:]
