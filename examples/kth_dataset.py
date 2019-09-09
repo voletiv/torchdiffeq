@@ -15,6 +15,7 @@ from torchvision.transforms import ToPILImage, Resize, ToTensor
 # import sys; del sys.modules['kth_dataset']; from kth_dataset import *
 # ds = KTH_Dataset('/home/voletiv/aa.h5'); dl = torch.utils.data.DataLoader(ds, batch_size=7, shuffle=False, collate_fn=lambda batch: ds.kth_collate_fn(batch)); di = iter(dl); a = next(di)
 
+
 class KTH_Dataset(Dataset):
 
     def __init__(self, h5_path, val=False, classes=None,
@@ -41,7 +42,7 @@ class KTH_Dataset(Dataset):
 
         self.lengths = lengths[[self.kth_classes.index(c) for c in self.labels]]
         if self.val:
-            self.offsets = np.arrray([l - l//10 for l in self.lengths])
+            self.offsets = np.array([l - l//10 for l in self.lengths])
             self.lengths = np.array([l//10 for l in self.lengths])
         else:
             self.offsets = np.zeros(len(self.lengths), dtype=int)
@@ -76,13 +77,10 @@ class KTH_Dataset(Dataset):
         vids = np.array([vids[i].reshape(-1, 120, 160)[rand_idx[i]:rand_idx[i] + self.n_frames_total, :, 20:140] for i in inv_idxs])
 
         # Resize to 64, value range [0., 1.]
-        vids = torch.stack([torch.stack([ToTensor()(Resize(64)(ToPILImage()(frame[:, :, np.newaxis]))) for frame in vid]) for vid in vids])
+        vids = torch.stack([torch.stack([ToTensor()(Resize(64)(ToPILImage()(frame[:, :, np.newaxis]))) for frame in vid]) for vid in vids]).mul(2.).sub(1.)
 
-        # Time steps
-        times_pred = torch.tensor(np.linspace(self.time_start, self.time_stop_cond, self.n_frames_pred))
-        times_future = torch.tensor(np.linspace(self.time_stop_cond, self.time_stop_cond + (self.time_stop_cond - self.time_start)/self.n_frames_pred*self.n_frames_future, self.n_frames_future))
-
-        return vids, times_pred, times_future, label_idxs
+        # Return vids_cond, vids_pred, vids_future, label_idxs
+        return vids[:, :self.n_frames_cond], vids[:, self.n_frames_cond:self.n_frames_cond+self.n_frames_pred], vids[:, self.n_frames_cond+self.n_frames_pred:], label_idxs
 
     def __getitem__(self, index):
         return index

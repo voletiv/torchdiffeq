@@ -20,44 +20,38 @@ import tqdm
 
 from cv2 import putText
 
-from moving_mnist import *
+from kth_dataset import KTH_Dataset
 
-# python latent_ode_moving_mnist.py --save_path /home/voletivi/scratch/ode/ODE_RNNEnc --n_vids 1000 --batch_size 128 --n_res_blocks 4 --res_ch 4 8 16 16 --nhidden 128 --latent_dim 16 --vis_step 100 --vis_n_vids 50 --num_workers 8 --seed 0
-
-# for i in tqdm.tqdm(range(10000)):
-#     this_dir = '/home/voletiv/Datasets/MyMovingMNIST/{:05d}'.format(i)
-#     os.makedirs(this_dir)
-#     for j in range(20):
-#         im = orig_trajs[i, j, 0].numpy()
-#         im = (im + 1.)/2.*255.
-#         im = im.astype('uint8')
-#         imageio.imwrite(os.path.join(this_dir, '{:02d}.png'.format(j+1)), im)
+# python latent_ode_kth.py --h5_path /home/voletivi/scratch/Datasets/KTH/kth.h5 --save_path /home/voletivi/scratch/ode/ODE_KTH --n_res_blocks 4 --res_ch 4 8 16 16 --nhidden 128 --latent_dim 16  --batch_size 128 --vis_step 100 --vis_n_vids 50 --num_workers 8 --seed 0
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_path', type=str, default='.',
-                    help="Path where 'train-images-idx3-ubyte.gz' can be found") # http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz
-parser.add_argument('--save_path', type=str, default='./ODE_MMNIST_EXP1')
-parser.add_argument('--n_vids', type=int, default=1000)
+parser.add_argument('--h5_path', type=str, help="Path of 'kth.h5'")
+parser.add_argument('--save_path', type=str, default='./ODE_KTH_EXP1')
+parser.add_argument('--classes', type=str, nargs='+', default=None, choices=[None, 'walking', 'jogging', 'running', 'boxing', 'handwaving', 'handclapping'])
 parser.add_argument('--seed', type=int, default=0)
 # Model, training
 parser.add_argument('--batch_size', type=int, default=128)
 parser.add_argument('--lr', type=float, default=0.0001)
 parser.add_argument('--n_res_blocks', type=int, default=4)
-parser.add_argument('--res_ch', nargs='+', type=int, default=[16, 32, 64, 64])
+parser.add_argument('--res_ch', nargs='+', type=int, default=[8, 16, 32, 32])
 # parser.add_argument('--obs_dim', type=int, default=256)
 parser.add_argument('--nhidden', type=int, default=128)
 parser.add_argument('--latent_dim', type=int, default=128)
 parser.add_argument('--skip_level', type=int, choices=[0, 1, 2, 3, 4], default=0)
 parser.add_argument('--gpu', type=int, default=0)
 # Data
-parser.add_argument('--num_digits', type=int, default=1)
-parser.add_argument('--n_frames_input', type=int, default=10)
-parser.add_argument('--n_frames_output', type=int, default=10)
+parser.add_argument('--n_frames_cond', type=int, default=10)
+parser.add_argument('--n_frames_pred', type=int, default=10)
+parser.add_argument('--n_frames_future', type=int, default=30)
 parser.add_argument('--imsize', type=int, default=64)
 parser.add_argument('--im_ch', type=int, default=1)
 
 parser.add_argument('--adjoint', type=eval, default=False)
+
+# parser.add_argument('--time_start', type=float, default=0)
+parser.add_argument('--time_stop_cond', type=float, default=0.5)
+parser.add_argument('--noise_std', type=float, default=0.3)
 
 parser.add_argument('--vis_step', type=int, default=50)
 parser.add_argument('--vis_n_vids', type=int, default=50, help="How many videos to visualize, must be <= batch_size")
@@ -66,6 +60,7 @@ parser.add_argument('--num_workers', type=int, default=1)
 
 args = parser.parse_args()
 
+args.time_start = 0.
 assert args.vis_n_vids <= args.batch_size, "ERROR: vis_n_vids must be <= batch_size! Given vis_n_vids=" + str(args.vis_n_vids) + " ; batch_size=" + str(args.batch_size)
 assert len(args.res_ch) == args.n_res_blocks, "ERROR: # of elements in res_ch must be equal to n_res_blocks! Given n_res_blocks = " + args.n_res_blocks + " ; res_ch = " + str(args.res_ch) + " ; len(res_ch) = " + str(len(args.res_ch))
 
@@ -73,24 +68,6 @@ if args.adjoint:
     from torchdiffeq import odeint_adjoint as odeint
 else:
     from torchdiffeq import odeint
-
-
-def ode_collate_fn(batch):
-    frames_input, frames_output = torch.stack([b[0] for b in batch]).float().mul(2.).sub(1.), torch.stack([b[1] for b in batch]).float().mul(2.).sub(1.)
-    frames_all = torch.cat((frames_input, frames_output), dim=1)
-    times_all = torch.from_numpy(np.linspace(0., 1., num=frames_all.shape[1])).float()
-    times_input = times_all[:frames_input.shape[1]]
-    return [frames_all, frames_input, times_all, times_input]
-
-
-def moving_mnist_ode_data_loader(dset_path, num_objects=[1], batch_size=100,
-                                 n_frames_input=5, n_frames_output=5,
-                                 num_workers=8):
-    transform = transforms.Compose([ToTensor()])
-    dset = MovingMNIST(dset_path, True, n_frames_input, n_frames_output, num_objects, transform)
-    dloader = data.DataLoader(dset, batch_size=batch_size, shuffle=True, collate_fn=ode_collate_fn,
-                              num_workers=num_workers, pin_memory=True)
-    return dloader
 
 
 class LatentODEfunc(nn.Module):
@@ -206,41 +183,6 @@ class EncoderRNN(nn.Module):
         return torch.zeros(batch_size, self.nhidden)
 
 
-# class Encoder(nn.Module):
-
-#     def __init__(self, latent_dim=128, obs_dim=1024, nhidden=256, skip_level=1):
-#         super(Encoder, self).__init__()
-#         self.latent_dim = latent_dim
-#         self.obs_dim = obs_dim
-#         self.nhidden = nhidden
-#         self.skip_level = skip_level
-#         self.res_block1 = ResBlock(1, 16, 2, 'downsample')      # 32x32 <-- 64x64
-#         self.res_block2 = ResBlock(16, 32, 2, 'downsample')     # 16x16
-#         self.res_block3 = ResBlock(32, 64, 2, 'downsample')     # 8x8
-#         self.res_block4 = ResBlock(64, 64, 2, 'downsample')     # 4x4; 4*4*64 = 1024 = obs_dim
-#         self.i2h = nn.Linear(obs_dim, nhidden)
-#         self.h2o = nn.Linear(nhidden, latent_dim)
-
-#     def forward(self, x):
-#         # bs = x.shape[0]
-#         x1 = self.res_block1(x)     # 32x32
-#         x2 = self.res_block2(x1)    # 16x16
-#         x3 = self.res_block3(x2)    # 8x8
-#         x4 = self.res_block4(x3)    # 4x4
-#         x = x4.view(-1, self.obs_dim)
-#         h = torch.tanh(self.i2h(x))
-#         out = self.h2o(h)
-#         if self.skip_level == 1:
-#             feats = x1
-#         elif self.skip_level == 2:
-#             feats = x2
-#         elif self.skip_level == 3:
-#             feats = x3
-#         elif self.skip_level == 4:
-#             feats = x4
-#         return out, feats
-
-
 class Decoder(nn.Module):
 
     def __init__(self, latent_dim=128, nhidden=256, # obs_dim=1024,
@@ -344,41 +286,51 @@ if __name__ == '__main__':
 
     if not os.path.exists(args.save_path):
         args.save_path = os.path.join(os.path.dirname(args.save_path),
-            f'{datetime.datetime.now():%Y%m%d_%H%M%S}_{os.path.basename(args.save_path)}_nVids{args.n_vids}_nRes{args.n_res_blocks}_')
+            f'{datetime.datetime.now():%Y%m%d_%H%M%S}_{os.path.basename(args.save_path)}_')
+        if args.classes:
+            for l in args.classes:
+                args.save_path += l + '_'
+        args.save_path += 'res_'
         for i in range(args.n_res_blocks):
             args.save_path += f'{args.res_ch[i]}_'
         args.save_path += f'hid{args.nhidden}_z{args.latent_dim}_skip{args.skip_level}_bs{args.batch_size}_lr{args.lr}_seed{args.seed}'
         os.makedirs(args.save_path)
         os.makedirs(os.path.join(args.save_path, 'samples'))
 
-    start = 0.
-    stop = 1.
-    noise_std = .3
+    print(args)
+
     device = torch.device('cuda:' + str(args.gpu)
                           if torch.cuda.is_available() else 'cpu')
     print("device:", device)
 
-    # Data
+    # DATA
     print("Loading data")
-    dl = moving_mnist_ode_data_loader(args.data_path, num_objects=[args.num_digits], batch_size=args.n_vids,
-                                        n_frames_input=args.n_frames_input, n_frames_output=args.n_frames_output,
-                                        num_workers=args.num_workers)
-    orig_trajs, samp_trajs, orig_ts, samp_ts = next(iter(dl))
-    samp_trajs, samp_ts = samp_trajs.to(device), samp_ts.to(device)
-    orig_trajs_vis = orig_trajs[:args.vis_n_vids]
-    orig_trajs_vis_gpu = orig_trajs_vis.clone().to(device)
-
-    # Val data
-    print("Loading val data")
-    orig_trajs_val, _, orig_ts_val, _ = next(iter(dl))
-    orig_trajs_val = orig_trajs_val[:args.vis_n_vids]
-    orig_trajs_val_gpu = orig_trajs_val.clone().to(device)
+    # Time steps
+    times_pred = torch.tensor(np.linspace(args.time_start, args.time_stop_cond, args.n_frames_pred))
+    times_predf = torch.cat([times_pred, torch.tensor(np.linspace(args.time_stop_cond + (args.time_stop_cond - args.time_start)/args.n_frames_pred, args.time_stop_cond + (args.time_stop_cond - args.time_start)/args.n_frames_pred*args.n_frames_future, args.n_frames_future))])
+    times_pred, times_predf = times_pred.to(device), times_predf.to(device)
+    # Train
+    train_ds = KTH_Dataset(args.h5_path, val=False, classes=args.classes,
+                            n_frames_cond=args.n_frames_cond, n_frames_pred=args.n_frames_pred, n_frames_future=args.n_frames_future,
+                            time_start=0, time_stop_cond=args.time_stop_cond)
+    train_dl = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, collate_fn=lambda batch: train_ds.kth_collate_fn(batch))
+    fixed_train_vids_cond, fixed_train_vids_pred, fixed_train_vids_future, _ = next(iter(train_dl))
+    fixed_train_vids_cond, fixed_train_vids_predf = fixed_train_vids_cond[:args.vis_n_vids].to(device), torch.cat([fixed_train_vids_pred[:args.vis_n_vids], fixed_train_vids_future[:args.vis_n_vids]], dim=1)
+    train_dl = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, collate_fn=lambda batch: train_ds.kth_collate_fn(batch))
+    # Val
+    val_ds = KTH_Dataset(args.h5_path, val=True, classes=args.classes,
+                            n_frames_cond=args.n_frames_cond, n_frames_pred=args.n_frames_pred, n_frames_future=args.n_frames_future,
+                            time_start=0, time_stop_cond=args.time_stop_cond)
+    val_dl = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=(len(val_ds) > args.batch_size), collate_fn=lambda batch: val_ds.kth_collate_fn(batch))
+    fixed_val_vids_cond, fixed_val_vids_pred, fixed_val_vids_future, _ = next(iter(val_dl))
+    fixed_val_vids_cond, fixed_val_vids_predf = fixed_val_vids_cond[:args.vis_n_vids].to(device), torch.cat([fixed_val_vids_pred[:args.vis_n_vids], fixed_val_vids_future[:args.vis_n_vids]], dim=1)
+    fixed_val_vids_predf_gpu = fixed_val_vids_predf.clone().to(device)
+    val_dl = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=lambda batch: val_ds.kth_collate_fn(batch))
 
     # Model
     print("Making models")
     func = LatentODEfunc(args.latent_dim, args.nhidden).to(device)
     enc = EncoderRNN(args.n_res_blocks, args.res_ch, args.nhidden, args.latent_dim, args.skip_level, args.imsize, args.im_ch).to(device)
-    # enc = Encoder(args.latent_dim, args.obs_dim, args.nhidden, args.skip_level).to(device)
     dec = Decoder(args.latent_dim, args.nhidden, args.n_res_blocks, args.res_ch[::-1], args.skip_level, args.imsize, args.im_ch).to(device)
     params = (list(func.parameters()) + list(dec.parameters()) + list(enc.parameters()))
     optimizer = optim.Adam(params, lr=args.lr)
@@ -387,14 +339,12 @@ if __name__ == '__main__':
     loss_meter = RunningAverageMeter(momentum=0.99)
     losses = []
     losses_ma = []
-    val_loss_meter_input = RunningAverageMeter(momentum=0.9)
-    val_losses_input = []
-    val_losses_ma_input = []
-    val_loss_meter_output = RunningAverageMeter(momentum=0.9)
-    val_losses_output = []
-    val_losses_ma_output = []
-    ts_pos = np.linspace(start, stop, num=args.n_frames_input+args.n_frames_output)
-    ts_pos = torch.from_numpy(ts_pos).float().to(device)
+    val_loss_meter_pred = RunningAverageMeter(momentum=0.9)
+    val_losses_pred = []
+    val_losses_ma_pred = []
+    val_loss_meter_future = RunningAverageMeter(momentum=0.9)
+    val_losses_future = []
+    val_losses_ma_future = []
 
     if args.save_path is not None:
         ckpt_path = os.path.join(args.save_path, 'ckpt.pth')
@@ -405,59 +355,50 @@ if __name__ == '__main__':
             enc.load_state_dict(checkpoint['enc_state_dict'])
             dec.load_state_dict(checkpoint['dec_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            orig_trajs = checkpoint['orig_trajs']
-            orig_ts = checkpoint['orig_ts']
-            samp_ts = checkpoint['samp_ts']
             print('Loaded ckpt from {}'.format(ckpt_path))
 
     log_file_name = os.path.join(args.save_path, 'log.txt')
     log_file = open(log_file_name, "wt")
+    log_file.write(str(args) + '\n')
+    log_file.flush()
 
-    noise_std_ = torch.zeros(args.batch_size, args.n_frames_input, args.im_ch, args.imsize, args.imsize) + noise_std
+    noise_std_ = torch.zeros(args.batch_size, args.n_frames_pred, args.im_ch, args.imsize, args.imsize) + args.noise_std
     noise_logvar = 2. * torch.log(noise_std_).to(device)
-    noise_std_z = torch.zeros(args.batch_size, args.n_frames_input, args.latent_dim) + noise_std
-    noise_logvar_z = 2. * torch.log(noise_std_z).to(device)
+    noise_std_val_ = torch.zeros(args.vis_n_vids, args.n_frames_pred + args.n_frames_future, args.im_ch, args.imsize, args.imsize) + args.noise_std
+    noise_logvar_val = 2. * torch.log(noise_std_val_).to(device)
 
     try:
         print("Starting training...")
-        n_batches = args.n_vids//args.batch_size
-        print("n_batches", n_batches)
-
-        vid_ids = np.arange(args.n_vids)
+        print("n_batches", len(train_dl))
 
         for epoch in range(1, args.n_epochs + 1):
             total_loss = 0
-            np.random.shuffle(vid_ids)
 
             # TRAIN
-            for b in range(n_batches):
+            for batch_vids_cond, batch_vids_pred, _, _ in train_dl:
                 # print("epoch", epoch)
                 optimizer.zero_grad()
-                # z, feats = enc(samp_trajs[vid_ids[b*args.batch_size:(b+1)*args.batch_size]].view(-1, args.im_ch, args.imsize, args.imsize))     # B*Txdim
-                # z = z.view(args.batch_size, -1, args.latent_dim)    # BxTxdim
-                # feats = feats.view(args.batch_size, -1, *feats.shape[1:])[:, 0:1].expand(args.batch_size, feats.shape[0]//args.batch_size, *feats.shape[1:]).contiguous().view(-1, *feats.shape[1:])
-                # backward in time to infer q(z_0)
+
+                batch_vids_cond, batch_vids_pred = batch_vids_cond.to(device), batch_vids_pred.to(device)
+
                 h = enc.initHidden(args.batch_size).to(device)
-                for t in reversed(range(samp_trajs.size(1))):
-                    obs = samp_trajs[vid_ids[b*args.batch_size:(b+1)*args.batch_size], t, :]
+                for t in range(args.n_frames_cond):
+                    obs = batch_vids_cond[:, t]
                     out, h, feats = enc.forward(obs, h)
+
                 qz0_mean, qz0_logvar = out[:, :args.latent_dim], out[:, args.latent_dim:]
                 epsilon = torch.randn(qz0_mean.size()).to(device)
-                z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+                z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean    # Bxdim
 
-                # forward in time and solve ode for reconstructions
+                # forward in time and solve ode for predictions
                 # print("doing ode")
-                # pred_z = odeint(func, z.permute(1, 0, 2)[0], samp_ts).permute(1, 0, 2)     # BxTxdim
-                pred_z = odeint(func, z0, samp_ts).permute(1, 0, 2)     # BxTxdim
+                pred_z = odeint(func, z0, times_pred).permute(1, 0, 2)     # BxTxdim
                 # print("decoding after ode")
                 pred_x = dec(pred_z, feats)    # BxTx1x64x64
 
                 # compute loss
                 # print("computing loss")
-                # import pdb; pdb.set_trace()
-                logpx = log_normal_pdf(samp_trajs[vid_ids[b*args.batch_size:(b+1)*args.batch_size]], pred_x, noise_logvar).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                # logpx += log_normal_pdf(z, pred_z, noise_logvar_z).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                # loss = -logpx
+                logpx = log_normal_pdf(batch_vids_pred, pred_x, noise_logvar).sum(-1).sum(-1).sum(-1).sum(-1).mean()
                 pz0_mean = pz0_logvar = torch.zeros(z0.size()).to(device)
                 analytic_kl = normal_kl(qz0_mean, qz0_logvar,
                                         pz0_mean, pz0_logvar).sum(-1)
@@ -470,8 +411,8 @@ if __name__ == '__main__':
 
                 del loss, out, h, pred_z, pred_x
 
-            loss_meter.update(total_loss/n_batches)
-            losses.append(total_loss/n_batches)
+            loss_meter.update(total_loss/len(train_dl))
+            losses.append(total_loss/len(train_dl))
             losses_ma.append(loss_meter.avg)
 
             log = 'Epoch: {}, running avg loss: {:.4f}\n'.format(epoch, loss_meter.avg)
@@ -486,27 +427,22 @@ if __name__ == '__main__':
                 # Sampling from TRAIN data
                 # print("Sampling")
                 with torch.no_grad():
-                    # z, feats = enc(orig_trajs_vis_gpu.view(-1, args.im_ch, args.imsize, args.imsize))   # B*Txdim
-                    # z = z.view(args.vis_n_vids, -1, args.latent_dim)    # BxTxdim
-                    # feats = feats.view(args.vis_n_vids, -1, *feats.shape[1:])[:, 0:1].expand(args.vis_n_vids, feats.shape[0]//args.vis_n_vids, *feats.shape[1:]).contiguous().view(-1, *feats.shape[1:])
-                    # xs_dec_z = dec(z, feats)    # BxTx1x64x64
                     h = enc.initHidden(args.vis_n_vids).to(device)
-                    for t in reversed(range(orig_trajs_vis_gpu.size(1)//2)):
-                        obs = orig_trajs_vis_gpu[:, t, :]
+                    for t in range(args.n_frames_cond):
+                        obs = fixed_train_vids_cond[:, t]
                         out, h, feats = enc.forward(obs, h)
                     qz0_mean, qz0_logvar = out[:, :args.latent_dim], out[:, args.latent_dim:]
                     epsilon = torch.randn(qz0_mean.size()).to(device)
                     z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
 
-                    pred_z = odeint(func, z0, ts_pos).permute(1, 0, 2) # BxTxdim
+                    pred_z = odeint(func, z0, times_predf).permute(1, 0, 2) # BxTxdim
                     xs_dec_pred_z = dec(pred_z, feats)    # BxTx1x64x64
 
-                # xs_dec_z = xs_dec_z.cpu()
                 xs_dec_pred_z = xs_dec_pred_z.cpu()
 
                 frames = []
                 for t in range(xs_dec_pred_z.shape[1]):
-                    xs_t = orig_trajs_vis[:, t]                        # Bx1x64x64
+                    xs_t = fixed_train_vids_predf[:, t]         # Bx1x64x64
                     xs_dec_pred_z_t = xs_dec_pred_z[:, t]       # Bx1x64x64
                     frame = torch.cat([xs_t, torch.ones(args.vis_n_vids, 1, 64, 2),
                                        xs_dec_pred_z_t], dim=-1)
@@ -519,67 +455,57 @@ if __name__ == '__main__':
 
                 # Sampling from VAL data
                 # print("Sampling")
-                # import pdb; pdb.set_trace()
                 with torch.no_grad():
-                    # z_val, feats_val = enc(orig_trajs_val_gpu.view(-1, args.im_ch, args.imsize, args.imsize))   # BxTxdim
-                    # z_val = z_val.view(args.vis_n_vids, -1, args.latent_dim)    # BxTxdim
-                    # feats_val = feats_val.view(args.vis_n_vids, -1, *feats_val.shape[1:])[:, 0:1].expand(args.vis_n_vids, feats_val.shape[0]//args.vis_n_vids, *feats_val.shape[1:]).contiguous().view(-1, *feats_val.shape[1:])
-                    # xs_dec_z_val = dec(z_val, feats_val)    # BxTx1x64x64
                     h = enc.initHidden(args.vis_n_vids).to(device)
-                    for t in reversed(range(orig_trajs_val_gpu.size(1)//2)):
-                        obs = orig_trajs_val_gpu[:, t, :]
+                    for t in range(args.n_frames_cond):
+                        obs = fixed_val_vids_predf_gpu[:, t]
                         out, h, feats = enc.forward(obs, h)
                     qz0_mean_val, qz0_logvar_val = out[:, :args.latent_dim], out[:, args.latent_dim:]
                     epsilon = torch.randn(qz0_mean.size()).to(device)
                     z0_val = epsilon * torch.exp(.5 * qz0_logvar_val) + qz0_mean_val
 
-                    pred_z_val = odeint(func, z0_val, ts_pos).permute(1, 0, 2) # BxTxdim
+                    pred_z_val = odeint(func, z0_val, times_predf).permute(1, 0, 2) # BxTxdim
                     xs_dec_pred_z_val = dec(pred_z_val, feats)  # BxTx1x64x64
 
-                logpx_val_input = log_normal_pdf(orig_trajs_val_gpu[:, :args.n_frames_input], xs_dec_pred_z_val[:, :args.n_frames_input], noise_logvar[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                # logpx_val_input += log_normal_pdf(z_val[:, :args.n_frames_input], pred_z_val[:, :args.n_frames_input], noise_logvar_z[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                
+                logpx_val_pred = log_normal_pdf(fixed_val_vids_predf_gpu[:, :args.n_frames_pred], xs_dec_pred_z_val[:, :args.n_frames_pred], noise_logvar[:, :args.n_frames_pred]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+
                 pz0_mean_val = pz0_logvar_val = torch.zeros(z0_val.size()).to(device)
                 analytic_kl_val = normal_kl(qz0_mean_val, qz0_logvar_val,
                                             pz0_mean_val, pz0_logvar_val).sum(-1)
-                val_loss_input = torch.mean(-logpx_val_input + analytic_kl_val, dim=0).item()
+                val_loss_pred = torch.mean(-logpx_val_pred + analytic_kl_val, dim=0).item()
 
-                val_loss_meter_input.update(val_loss_input)
-                val_losses_input.append(val_loss_input)
-                val_losses_ma_input.append(val_loss_meter_input.avg)
+                val_loss_meter_pred.update(val_loss_pred)
+                val_losses_pred.append(val_loss_pred)
+                val_losses_ma_pred.append(val_loss_meter_pred.avg)
 
-                logpx_val_output = log_normal_pdf(orig_trajs_val_gpu[:, args.n_frames_input:], xs_dec_pred_z_val[:, args.n_frames_input:], noise_logvar[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                # logpx_val_output += log_normal_pdf(z_val[:, args.n_frames_input:], pred_z_val[:, args.n_frames_input:], noise_logvar_z[:args.vis_n_vids]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                val_loss_output = -logpx_val_output.item()
-                val_loss_meter_output.update(val_loss_output)
-                val_losses_output.append(val_loss_output)
-                val_losses_ma_output.append(val_loss_meter_output.avg)
+                logpx_val_future = log_normal_pdf(fixed_val_vids_predf_gpu[:, args.n_frames_pred:], xs_dec_pred_z_val[:, args.n_frames_pred:], noise_logvar_val[:, args.n_frames_pred:]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+                val_loss_future = -logpx_val_future.item()
+                val_loss_meter_future.update(val_loss_future)
+                val_losses_future.append(val_loss_future)
+                val_losses_ma_future.append(val_loss_meter_future.avg)
 
-                # xs_dec_z_val = xs_dec_z_val.cpu()
                 xs_dec_pred_z_val = xs_dec_pred_z_val.cpu()
 
                 frames_val = []
                 for t in range(xs_dec_pred_z_val.shape[1]):
-                    xs_t = orig_trajs_val[:, t]                         # Bx64x64
-                    # xs_dec_z_t = xs_dec_z_val[:, t]                  # Bx64x64
+                    xs_t = fixed_val_vids_predf[:, t]              # Bx64x64
                     xs_dec_pred_z_t = xs_dec_pred_z_val[:, t]      # Bx64x64
                     frame = torch.cat([xs_t, torch.ones(args.vis_n_vids, args.im_ch, args.imsize, 2),
-                                       # xs_dec_z_t, torch.ones(args.vis_n_vids, args.im_ch, args.imsize, 2),
                                        xs_dec_pred_z_t], dim=-1)
                     gif_frame = vutils.make_grid(frame, nrow=10, padding=8, pad_value=1).permute(1, 2, 0).add(1.).mul(0.5).numpy()
                     frames_val.append((putText(np.concatenate((np.ones((40, gif_frame.shape[1], gif_frame.shape[2])), gif_frame), axis=0), f"time = {t+1}", (8, 30), 0, 1, (0,0,0), 4)*255).astype('uint8'))
                     del frame, gif_frame
 
                 imageio.mimwrite(os.path.join(args.save_path, 'samples', f'val_vis_{epoch:06d}.gif'), frames_val, fps=4)
-                del xs_dec_pred_z_val, val_loss_input, val_loss_output, frames_val
+                del xs_dec_pred_z_val, val_loss_pred, val_loss_future, frames_val
 
                 # Plot
                 plt.plot(np.arange(1, epoch+1), losses, '--', c='C0', alpha=0.7, label="loss")
                 plt.plot(np.arange(1, epoch+1), losses_ma, c='C0', alpha=0.7, label="loss")
-                plt.plot(np.arange(epoch//args.vis_step)*args.vis_step + args.vis_step, val_losses_input, '--', c='C1', alpha=0.5, label="val_loss_input")
-                plt.plot(np.arange(epoch//args.vis_step)*args.vis_step + args.vis_step, val_losses_ma_input, c='C1', alpha=0.5, label="val_loss_ma_input")
-                plt.plot(np.arange(epoch//args.vis_step)*args.vis_step + args.vis_step, val_losses_output, '--', c='C2', alpha=0.5, label="val_loss_output")
-                plt.plot(np.arange(epoch//args.vis_step)*args.vis_step + args.vis_step, val_losses_ma_output, c='C2', alpha=0.5, label="val_loss_ma_output")
+                plt.plot(np.arange(epoch//args.vis_step)*args.vis_step + args.vis_step, val_losses_pred, '--', c='C1', alpha=0.5, label="val_loss_pred")
+                plt.plot(np.arange(epoch//args.vis_step)*args.vis_step + args.vis_step, val_losses_ma_pred, c='C1', alpha=0.5, label="val_loss_ma_pred")
+                plt.plot(np.arange(epoch//args.vis_step)*args.vis_step + args.vis_step, val_losses_future, '--', c='C2', alpha=0.5, label="val_loss_future")
+                plt.plot(np.arange(epoch//args.vis_step)*args.vis_step + args.vis_step, val_losses_ma_future, c='C2', alpha=0.5, label="val_loss_ma_future")
                 plt.legend()
                 plt.yscale("symlog")
                 plt.xlabel("Epochs")
@@ -601,10 +527,6 @@ if __name__ == '__main__':
         'enc_state_dict': enc.state_dict(),
         'dec_state_dict': dec.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'orig_trajs': orig_trajs,
-        'samp_trajs': samp_trajs,
-        'orig_ts': orig_ts,
-        'samp_ts': samp_ts,
     }, ckpt_path)
     log = 'Stored ckpt at {}\n'.format(ckpt_path)
     print(log)
