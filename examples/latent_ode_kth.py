@@ -467,7 +467,7 @@ if __name__ == '__main__':
                     pred_z_val = odeint(func, z0_val, times_predf).permute(1, 0, 2) # BxTxdim
                     xs_dec_pred_z_val = dec(pred_z_val, feats)  # BxTx1x64x64
 
-                logpx_val_pred = log_normal_pdf(fixed_val_vids_predf_gpu[:, :args.n_frames_pred], xs_dec_pred_z_val[:, :args.n_frames_pred], noise_logvar[:, :args.n_frames_pred]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
+                logpx_val_pred = log_normal_pdf(fixed_val_vids_predf_gpu[:, :args.n_frames_pred], xs_dec_pred_z_val[:, :args.n_frames_pred], noise_logvar_val[:, :args.n_frames_pred]).sum(-1).sum(-1).sum(-1).sum(-1).mean()
 
                 pz0_mean_val = pz0_logvar_val = torch.zeros(z0_val.size()).to(device)
                 analytic_kl_val = normal_kl(qz0_mean_val, qz0_logvar_val,
