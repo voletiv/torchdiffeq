@@ -22,7 +22,7 @@ from cv2 import putText
 
 from moving_mnist import *
 
-# python latent_ode_moving_mnist.py --save_path /home/voletivi/scratch/ode/ODE_RNNEnc --n_vids 1000 --batch_size 128 --n_res_blocks 4 --res_ch 4 8 16 16 --nhidden 128 --latent_dim 16 --vis_step 100 --vis_n_vids 50 --num_workers 8 --seed 0
+# python latent_ode_moving_mnist.py --save_path /home/voletivi/scratch/ode/ODE_RNNEnc --n_vids 10000 --batch_size 128 --n_res_blocks 4 --res_ch 8 16 32 32 --nhidden 128 --latent_dim 64 --vis_step 100 --vis_n_vids 50 --num_workers 8 --n_epochs 1001 --seed 0
 
 # for i in tqdm.tqdm(range(10000)):
 #     this_dir = '/home/voletiv/Datasets/MyMovingMNIST/{:05d}'.format(i)
@@ -38,16 +38,16 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--data_path', type=str, default='.',
                     help="Path where 'train-images-idx3-ubyte.gz' can be found") # http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz
 parser.add_argument('--save_path', type=str, default='./ODE_MMNIST_EXP1')
-parser.add_argument('--n_vids', type=int, default=1000)
+parser.add_argument('--n_vids', type=int, default=10000)
 parser.add_argument('--seed', type=int, default=0)
 # Model, training
 parser.add_argument('--batch_size', type=int, default=128)
 parser.add_argument('--lr', type=float, default=0.0001)
 parser.add_argument('--n_res_blocks', type=int, default=4)
-parser.add_argument('--res_ch', nargs='+', type=int, default=[16, 32, 64, 64])
+parser.add_argument('--res_ch', nargs='+', type=int, default=[8, 16, 32, 32])
 # parser.add_argument('--obs_dim', type=int, default=256)
 parser.add_argument('--nhidden', type=int, default=128)
-parser.add_argument('--latent_dim', type=int, default=128)
+parser.add_argument('--latent_dim', type=int, default=64)
 parser.add_argument('--skip_level', type=int, choices=[0, 1, 2, 3, 4], default=0)
 parser.add_argument('--gpu', type=int, default=0)
 # Data
@@ -59,10 +59,11 @@ parser.add_argument('--im_ch', type=int, default=1)
 
 parser.add_argument('--adjoint', type=eval, default=False)
 
-parser.add_argument('--vis_step', type=int, default=50)
+parser.add_argument('--model_save_step', type=int, default=100)
+parser.add_argument('--vis_step', type=int, default=100)
 parser.add_argument('--vis_n_vids', type=int, default=50, help="How many videos to visualize, must be <= batch_size")
-parser.add_argument('--n_epochs', type=int, default=10000)
-parser.add_argument('--num_workers', type=int, default=1)
+parser.add_argument('--n_epochs', type=int, default=1002)
+parser.add_argument('--num_workers', type=int, default=8)
 
 args = parser.parse_args()
 
@@ -350,6 +351,20 @@ if __name__ == '__main__':
         args.save_path += f'hid{args.nhidden}_z{args.latent_dim}_skip{args.skip_level}_bs{args.batch_size}_lr{args.lr}_seed{args.seed}'
         os.makedirs(args.save_path)
         os.makedirs(os.path.join(args.save_path, 'samples'))
+        os.makedirs(os.path.join(args.save_path, 'checkpoints'))
+    else:
+        ckpt_path = os.path.join(args.save_path, 'checkpoints', 'ckpt.pth')
+        if os.path.exists(ckpt_path):
+            print("Loading model ckpt from", ckpt_path)
+            checkpoint = torch.load(ckpt_path)
+            func.load_state_dict(checkpoint['func_state_dict'])
+            enc.load_state_dict(checkpoint['enc_state_dict'])
+            dec.load_state_dict(checkpoint['dec_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            orig_trajs = checkpoint['orig_trajs']
+            orig_ts = checkpoint['orig_ts']
+            samp_ts = checkpoint['samp_ts']
+            print('Loaded ckpt from {}'.format(ckpt_path))
 
     start = 0.
     stop = 1.
@@ -396,22 +411,10 @@ if __name__ == '__main__':
     ts_pos = np.linspace(start, stop, num=args.n_frames_input+args.n_frames_output)
     ts_pos = torch.from_numpy(ts_pos).float().to(device)
 
-    if args.save_path is not None:
-        ckpt_path = os.path.join(args.save_path, 'ckpt.pth')
-        if os.path.exists(ckpt_path):
-            print("Loading model ckpt from", args.save_path)
-            checkpoint = torch.load(ckpt_path)
-            func.load_state_dict(checkpoint['func_state_dict'])
-            enc.load_state_dict(checkpoint['enc_state_dict'])
-            dec.load_state_dict(checkpoint['dec_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            orig_trajs = checkpoint['orig_trajs']
-            orig_ts = checkpoint['orig_ts']
-            samp_ts = checkpoint['samp_ts']
-            print('Loaded ckpt from {}'.format(ckpt_path))
-
     log_file_name = os.path.join(args.save_path, 'log.txt')
     log_file = open(log_file_name, "wt")
+    log_file.write(str(args))
+    log_file.flush()
 
     noise_std_ = torch.zeros(args.batch_size, args.n_frames_input, args.im_ch, args.imsize, args.imsize) + noise_std
     noise_logvar = 2. * torch.log(noise_std_).to(device)
@@ -479,6 +482,20 @@ if __name__ == '__main__':
             print(log)
             log_file.write(log)
             log_file.flush()
+
+            # SAVE MODEL
+            if epoch % args.model_save_step == 0:
+                ckpt_path = os.path.join(args.save_path, 'checkpoints', f'ckpt_{epoch:05d}.pth')
+                torch.save({
+                    'func_state_dict': func.state_dict(),
+                    'enc_state_dict': enc.state_dict(),
+                    'dec_state_dict': dec.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict()
+                }, ckpt_path)
+                log = 'Stored ckpt at {}\n'.format(ckpt_path)
+                print(log)
+                # log_file.write(log)
+                # log_file.flush()
 
             # VISUALIZE
             if epoch % args.vis_step == 0:
@@ -595,7 +612,7 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print("Ctrl+C!\n")
 
-    ckpt_path = os.path.join(args.save_path, 'ckpt.pth')
+    ckpt_path = os.path.join(args.save_path, 'checkpoints', f'ckpt.pth')
     torch.save({
         'func_state_dict': func.state_dict(),
         'enc_state_dict': enc.state_dict(),
