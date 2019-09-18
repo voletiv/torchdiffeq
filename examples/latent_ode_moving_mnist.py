@@ -10,6 +10,7 @@ import numpy as np
 import numpy.random as npr
 import os
 import random
+import sys
 import time
 import torch
 import torch.nn as nn
@@ -339,6 +340,8 @@ def mem_check():
 
 if __name__ == '__main__':
 
+    args.command = 'python ' + ' '.join(sys.argv)
+
     np.random.seed (args.seed)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -352,19 +355,9 @@ if __name__ == '__main__':
         os.makedirs(args.save_path)
         os.makedirs(os.path.join(args.save_path, 'samples'))
         os.makedirs(os.path.join(args.save_path, 'checkpoints'))
+        load_ckpt = False
     else:
-        ckpt_path = os.path.join(args.save_path, 'checkpoints', 'ckpt.pth')
-        if os.path.exists(ckpt_path):
-            print("Loading model ckpt from", ckpt_path)
-            checkpoint = torch.load(ckpt_path)
-            func.load_state_dict(checkpoint['func_state_dict'])
-            enc.load_state_dict(checkpoint['enc_state_dict'])
-            dec.load_state_dict(checkpoint['dec_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            orig_trajs = checkpoint['orig_trajs']
-            orig_ts = checkpoint['orig_ts']
-            samp_ts = checkpoint['samp_ts']
-            print('Loaded ckpt from {}'.format(ckpt_path))
+        load_ckpt = True
 
     start = 0.
     stop = 1.
@@ -372,22 +365,6 @@ if __name__ == '__main__':
     device = torch.device('cuda:' + str(args.gpu)
                           if torch.cuda.is_available() else 'cpu')
     print("device:", device)
-
-    # Data
-    print("Loading data")
-    dl = moving_mnist_ode_data_loader(args.data_path, num_objects=[args.num_digits], batch_size=args.n_vids,
-                                        n_frames_input=args.n_frames_input, n_frames_output=args.n_frames_output,
-                                        num_workers=args.num_workers)
-    orig_trajs, samp_trajs, orig_ts, samp_ts = next(iter(dl))
-    samp_trajs, samp_ts = samp_trajs.to(device), samp_ts.to(device)
-    orig_trajs_vis = orig_trajs[:args.vis_n_vids]
-    orig_trajs_vis_gpu = orig_trajs_vis.clone().to(device)
-
-    # Val data
-    print("Loading val data")
-    orig_trajs_val, _, orig_ts_val, _ = next(iter(dl))
-    orig_trajs_val = orig_trajs_val[:args.vis_n_vids]
-    orig_trajs_val_gpu = orig_trajs_val.clone().to(device)
 
     # Model
     print("Making models")
@@ -397,6 +374,45 @@ if __name__ == '__main__':
     dec = Decoder(args.latent_dim, args.nhidden, args.n_res_blocks, args.res_ch[::-1], args.skip_level, args.imsize, args.im_ch).to(device)
     params = (list(func.parameters()) + list(dec.parameters()) + list(enc.parameters()))
     optimizer = optim.Adam(params, lr=args.lr)
+
+    if load_ckpt:
+        ckpt_path = os.path.join(args.save_path, 'checkpoints', 'ckpt.pth')
+        if os.path.exists(ckpt_path):
+            print("Loading model ckpt from", ckpt_path)
+            checkpoint = torch.load(ckpt_path)
+            func.load_state_dict(checkpoint['func_state_dict'])
+            enc.load_state_dict(checkpoint['enc_state_dict'])
+            dec.load_state_dict(checkpoint['dec_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            print('Loaded ckpt from {}'.format(ckpt_path))
+    
+    func = func.to(device)
+    enc = enc.to(device)
+    dec = dec.to(device)
+
+    # Data
+    print("Loading data")
+    if not load_ckpt:
+        dl = moving_mnist_ode_data_loader(args.data_path, num_objects=[args.num_digits], batch_size=args.n_vids,
+                                          n_frames_input=args.n_frames_input, n_frames_output=args.n_frames_output,
+                                          num_workers=args.num_workers)
+        orig_trajs, samp_trajs, orig_ts, samp_ts = next(iter(dl))
+
+        # Val data
+        print("Loading val data")
+        orig_trajs_val, _, orig_ts_val, _ = next(iter(dl))
+        orig_trajs_val = orig_trajs_val[:args.vis_n_vids]
+    else:
+        orig_trajs = checkpoint['orig_trajs']
+        orig_ts = checkpoint['orig_ts']
+        samp_trajs = orig_trajs[:, :args.n_frames_input]
+        samp_ts = orig_ts[:, :args.n_frames_input]
+        orig_trajs_val = checkpoint['orig_trajs_val']
+
+    samp_trajs, samp_ts = samp_trajs.to(device), samp_ts.to(device)
+    orig_trajs_vis = orig_trajs[:args.vis_n_vids]
+    orig_trajs_vis_gpu = orig_trajs_vis.clone().to(device)
+    orig_trajs_val_gpu = orig_trajs_val.clone().to(device)
 
     # Vars
     loss_meter = RunningAverageMeter(momentum=0.99)
@@ -413,7 +429,7 @@ if __name__ == '__main__':
 
     log_file_name = os.path.join(args.save_path, 'log.txt')
     log_file = open(log_file_name, "wt")
-    log_file.write(str(args))
+    log_file.write(str(args) + '\n')
     log_file.flush()
 
     noise_std_ = torch.zeros(args.batch_size, args.n_frames_input, args.im_ch, args.imsize, args.imsize) + noise_std
@@ -487,9 +503,9 @@ if __name__ == '__main__':
             if epoch % args.model_save_step == 0:
                 ckpt_path = os.path.join(args.save_path, 'checkpoints', f'ckpt_{epoch:05d}.pth')
                 torch.save({
-                    'func_state_dict': func.state_dict(),
-                    'enc_state_dict': enc.state_dict(),
-                    'dec_state_dict': dec.state_dict(),
+                    'func_state_dict': func.module.state_dict() if hasattr(func, "module") else func.state_dict(),
+                    'enc_state_dict': enc.module.state_dict() if hasattr(enc, "module") else enc.state_dict(),
+                    'dec_state_dict': dec.module.state_dict() if hasattr(dec, "module") else dec.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict()
                 }, ckpt_path)
                 log = 'Stored ckpt at {}\n'.format(ckpt_path)
@@ -614,14 +630,16 @@ if __name__ == '__main__':
 
     ckpt_path = os.path.join(args.save_path, 'checkpoints', f'ckpt.pth')
     torch.save({
-        'func_state_dict': func.state_dict(),
-        'enc_state_dict': enc.state_dict(),
-        'dec_state_dict': dec.state_dict(),
+        'func': func.module if hasattr(func, "module") else func,
+        'func_state_dict': func.module.state_dict() if hasattr(func, "module") else func.state_dict(),
+        'enc': enc.module if hasattr(enc, "module") else enc,
+        'enc_state_dict': enc.module.staet_dict() if hasattr(enc, "module") else enc.state_dict(),
+        'dec': dec.module if hasattr(dec, "module") else dec,
+        'dec_state_dict': dec.module.state_dict() if hasattr(dec, "module") else dec.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'orig_trajs': orig_trajs,
-        'samp_trajs': samp_trajs,
         'orig_ts': orig_ts,
-        'samp_ts': samp_ts,
+        'orig_trajs_val': orig_trajs_val
     }, ckpt_path)
     log = 'Stored ckpt at {}\n'.format(ckpt_path)
     print(log)
