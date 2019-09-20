@@ -432,6 +432,25 @@ if __name__ == '__main__':
     log_file.write(str(args) + '\n')
     log_file.flush()
 
+    ckpt_path = os.path.join(args.save_path, 'checkpoints', 'ckpt_init.pth')
+    print(f"Saving ckpt_init at {ckpt_path}")
+    torch.save({
+        'func': func.module if hasattr(func, "module") else func,
+        'func_state_dict': func.module.state_dict() if hasattr(func, "module") else func.state_dict(),
+        'enc': enc.module if hasattr(enc, "module") else enc,
+        'enc_state_dict': enc.module.staet_dict() if hasattr(enc, "module") else enc.state_dict(),
+        'dec': dec.module if hasattr(dec, "module") else dec,
+        'dec_state_dict': dec.module.state_dict() if hasattr(dec, "module") else dec.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'orig_trajs': orig_trajs,
+        'orig_ts': orig_ts,
+        'orig_trajs_val': orig_trajs_val
+    }, ckpt_path)
+    log = f'Stored ckpt_init at {ckpt_path}\n'
+    print(log)
+    log_file.write(log)
+    log_file.flush()
+
     noise_std_ = torch.zeros(args.batch_size, args.n_frames_input, args.im_ch, args.imsize, args.imsize) + noise_std
     noise_logvar = 2. * torch.log(noise_std_).to(device)
     noise_std_z = torch.zeros(args.batch_size, args.n_frames_input, args.latent_dim) + noise_std
@@ -443,6 +462,8 @@ if __name__ == '__main__':
         print("n_batches", n_batches)
 
         vid_ids = np.arange(args.n_vids)
+
+        start_time = time.time()
 
         for epoch in range(1, args.n_epochs + 1):
             total_loss = 0
@@ -493,7 +514,10 @@ if __name__ == '__main__':
             losses.append(total_loss/n_batches)
             losses_ma.append(loss_meter.avg)
 
-            log = 'Epoch: {}, running avg loss: {:.4f}\n'.format(epoch, loss_meter.avg)
+            curr_time = time.time()
+            curr_time_str = datetime.datetime.fromtimestamp(curr_time).strftime('%Y-%m-%d %H:%M:%S')
+            elapsed = str(datetime.timedelta(seconds=(curr_time - start_time)))
+            log = '[{}] [{}] Epoch: {}, running avg loss: {:.4f}\n'.format(curr_time_str, elapsed, epoch, loss_meter.avg)
             print(args.save_path)
             print(log)
             log_file.write(log)
@@ -628,25 +652,8 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print("Ctrl+C!\n")
 
-    ckpt_path = os.path.join(args.save_path, 'checkpoints', f'ckpt.pth')
-    torch.save({
-        'func': func.module if hasattr(func, "module") else func,
-        'func_state_dict': func.module.state_dict() if hasattr(func, "module") else func.state_dict(),
-        'enc': enc.module if hasattr(enc, "module") else enc,
-        'enc_state_dict': enc.module.staet_dict() if hasattr(enc, "module") else enc.state_dict(),
-        'dec': dec.module if hasattr(dec, "module") else dec,
-        'dec_state_dict': dec.module.state_dict() if hasattr(dec, "module") else dec.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'orig_trajs': orig_trajs,
-        'orig_ts': orig_ts,
-        'orig_trajs_val': orig_trajs_val
-    }, ckpt_path)
-    log = 'Stored ckpt at {}\n'.format(ckpt_path)
-    print(log)
-    log_file.write(log)
-    log_file.flush()
-
     log = 'Training complete after {} epochs.\n'.format(epoch)
     print(log)
     log_file.write(log)
     log_file.flush()
+
