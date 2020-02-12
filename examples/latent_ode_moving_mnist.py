@@ -495,9 +495,7 @@ if __name__ == '__main__':
                 # compute loss
                 # print("computing loss")
                 # import pdb; pdb.set_trace()
-                logpx = log_normal_pdf(samp_trajs[vid_ids[b*args.batch_size:(b+1)*args.batch_size]], pred_x, noise_logvar).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                # logpx += log_normal_pdf(z, pred_z, noise_logvar_z).sum(-1).sum(-1).sum(-1).sum(-1).mean()
-                # loss = -logpx
+                logpx = log_normal_pdf(samp_trajs[vid_ids[b*args.batch_size:(b+1)*args.batch_size]], pred_x, noise_logvar).sum(-1).sum(-1).sum(-1).sum(-1)
                 pz0_mean = pz0_logvar = torch.zeros(z0.size()).to(device)
                 analytic_kl = normal_kl(qz0_mean, qz0_logvar,
                                         pz0_mean, pz0_logvar).sum(-1)
